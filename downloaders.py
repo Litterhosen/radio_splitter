@@ -1,35 +1,32 @@
+import yt_dlp
 from pathlib import Path
-
-from utils import ensure_dir, find_ffmpeg
-from yt_dlp import YoutubeDL
 
 
 def download_audio(url: str, out_dir: Path) -> Path:
-    out_dir = ensure_dir(out_dir)
-    ffmpeg = find_ffmpeg()
+    out_dir.mkdir(parents=True, exist_ok=True)
 
     ydl_opts = {
-        "outtmpl": str(out_dir / "%(title)s.%(ext)s"),
         "format": "bestaudio/best",
+        "outtmpl": str(out_dir / "%(title)s.%(ext)s"),
+        "quiet": False,
         "noplaylist": True,
-        "quiet": True,
-        "no_warnings": True,
-        "ffmpeg_location": ffmpeg if ffmpeg != "ffmpeg" else None,
+        "geo_bypass": True,
+        "nocheckcertificate": True,
+        "extract_flat": False,
         "postprocessors": [
-            {"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "192"},
+            {
+                "key": "FFmpegExtractAudio",
+                "preferredcodec": "mp3",
+                "preferredquality": "192",
+            }
         ],
+        "http_headers": {
+            "User-Agent": "Mozilla/5.0"
+        }
     }
 
-    with YoutubeDL(ydl_opts) as ydl:
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=True)
-        title = info.get("title", "download")
-        final = out_dir / f"{title}.mp3"
-        if final.exists():
-            return final
+        filename = ydl.prepare_filename(info)
 
-        req = ydl.prepare_filename(info)
-        p = Path(req).with_suffix(".mp3")
-        if p.exists():
-            return p
-
-    raise RuntimeError("Download lykkedes ikke (ingen mp3 fundet).")
+    return Path(filename).with_suffix(".mp3")
