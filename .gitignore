@@ -1,0 +1,9 @@
+.venv/
+.venv1/
+__pycache__/
+output/
+.DS_Store
+*.log
+*.zip
+*.wav
+*.mp3
