@@ -1,0 +1,20 @@
+streamlit==1.37.1
+pandas==2.2.2
+numpy==1.26.4
+
+# audio + analysis
+librosa==0.10.2.post1
+soundfile==0.12.1
+scipy==1.17.0
+
+# whisper
+faster-whisper==1.2.1
+
+# fuzzy matching
+rapidfuzz==3.9.7
+
+# downloader
+yt-dlp==2025.7.21
+
+# ffmpeg fallback binary
+imageio-ffmpeg==0.6.0
