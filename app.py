@@ -632,9 +632,15 @@ if run_btn:
             progress_bar.empty()
             st.session_state.results = results
         
-        status.update(label="✅ Færdig! Scroll ned for at se resultaterne.", state="complete", expanded=False)
+        if not results:
+             status.update(label="⚠️ Færdig, men fandt ingen klip.", state="error", expanded=True)
+             st.error("Modellen fandt ingen klip med de nuværende indstillinger. Prøv at justere sliderne (f.eks. 'Hook-længde' eller 'Threshold').")
+        else:
+             status.update(label=f"✅ Succes! Fandt {len(results)} klip.", state="complete", expanded=False)
+             st.balloons()
+             st.success(f"Færdig! Scroll ned for at se dine {len(results)} klip.")
+
     # ------------------ PROGRESS BAR SECTION END ------------------
-    st.balloons()
 
 
 # ----------------------------
