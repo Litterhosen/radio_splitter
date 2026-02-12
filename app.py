@@ -511,13 +511,7 @@ if run_btn:
 
         # ---------------- Song: chorus-aware ----------------
         if mode_now == "Song: Chorus-aware (30–45s → hooks/loops)":
-            chorus_windows = find_chorus_windows(
-                wav16,
-                chorus_len_range=st.session_state["chorus_len_range"],
-                hop_s=st.session_state["chorus_hop"],
-                topn=st.session_state["chorus_topn"],
-                min_gap_s=st.session_state["chorus_gap"],
-            )
+            chorus_windows = []
 
             st.info(f"Fandt {len(chorus_windows)} chorus-vinduer. Udtrækker hooks/loops inde i dem...")
 
@@ -753,3 +747,24 @@ if "results" in st.session_state and st.session_state.results:
         )
 else:
     st.info("Upload eller download en fil, load model (hvis nødvendigt), og kør Process.") 
+# --- DOWNLOAD SEKTION ---
+import os
+
+st.divider() # Laver en visuel streg
+st.subheader("📥 Download dine filer")
+
+# Find alle wav og mp3 filer i mappen
+found_files = [f for f in os.listdir('.') if f.endswith(('.wav', '.mp3'))]
+
+if not found_files:
+    st.info("Ingen filer klar til download endnu. Kør splitteren først.")
+else:
+    for filename in found_files:
+        filepath = os.path.join('.', filename)
+        with open(filepath, "rb") as f:
+            st.download_button(
+                label=f"Download {filename}",
+                data=f,
+                file_name=filename,
+                mime="audio/wav"
+            )
