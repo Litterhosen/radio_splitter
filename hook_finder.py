@@ -27,23 +27,17 @@ def ffmpeg_to_wav16k_mono(in_path, out_path):
     subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
-def estimate_bpm(y, sr):
-    tempo, _ = librosa.beat.beat_track(y=y, sr=sr)
-    return float(tempo)
-
-
 def find_hooks(
     wav_path,
     hook_len_range=(4.0, 15.0),
     prefer_len=8.0,
     hop_s=1.0,
-    topn=12,
+    topn=10,
     min_gap_s=2.0,
 ):
     y, sr = librosa.load(wav_path, sr=22050)
     duration = librosa.get_duration(y=y, sr=sr)
 
-    min_len, max_len = hook_len_range
     win_len = prefer_len
     hop = hop_s
 
@@ -53,6 +47,7 @@ def find_hooks(
     while t + win_len < duration:
         start = t
         end = t + win_len
+
         s = int(start * sr)
         e = int(end * sr)
         seg = y[s:e]
@@ -63,12 +58,12 @@ def find_hooks(
         energy = float(np.mean(np.abs(seg)))
         stability = float(np.std(seg))
         loopability = 1.0 / (1.0 + stability)
+        score = energy * 0.7 + loopability * 0.3
 
-        score = energy * 0.6 + loopability * 0.4
-        bpm = estimate_bpm(seg, sr)
+        tempo, _ = librosa.beat.beat_track(y=seg, sr=sr)
 
         windows.append(
-            HookWindow(start, end, score, energy, loopability, stability, bpm)
+            HookWindow(start, end, score, energy, loopability, stability, float(tempo))
         )
 
         t += hop
