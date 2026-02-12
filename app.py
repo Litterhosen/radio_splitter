@@ -40,12 +40,21 @@ MODES = [
     "Song: Find hooks/loops (4–15s) (beat-aware)",
 ]
 
+# init default KUN før widget skabes
 if "mode" not in st.session_state:
-    st.session_state["mode"] = MODES[0]
+    st.session_state.mode = MODES[0]
 
 st.sidebar.header("Mode")
-mode = st.sidebar.selectbox("Vælg mode", MODES, index=MODES.index(st.session_state["mode"]), key="mode")
-st.session_state["mode"] = mode
+mode = st.sidebar.selectbox(
+    "Vælg mode",
+    MODES,
+    index=MODES.index(st.session_state.mode),
+    key="mode",
+)
+
+# VIGTIGT:
+# IKKE skriv st.session_state["mode"] = mode her.
+# Streamlit gør det selv pga key="mode".
 
 
 # ---------------- Whisper settings ----------------
