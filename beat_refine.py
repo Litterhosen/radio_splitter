@@ -1,14 +1,6 @@
-from __future__ import annotations
-
-from dataclasses import dataclass
 import numpy as np
-
-try:
-    import librosa
-except Exception as e:
-    raise RuntimeError(
-        "Kunne ikke importere librosa i beat_refine.py. Tjek requirements og rebuild."
-    ) from e
+import librosa
+from dataclasses import dataclass
 
 
 @dataclass
@@ -19,72 +11,40 @@ class RefineResult:
     bpm: float
     bars: int
     score: float
-    reason: str = ""
-
-
-def _boundary_similarity(y, sr, t1, t2) -> float:
-    w = int(0.12 * sr)
-    i1 = int(max(0, t1 * sr))
-    i2 = int(max(0, t2 * sr))
-    a = y[i1:i1 + w]
-    b = y[max(0, i2 - w):i2]
-    if len(a) < w or len(b) < w:
-        return 0.0
-    a = a / (np.linalg.norm(a) + 1e-9)
-    b = b / (np.linalg.norm(b) + 1e-9)
-    return float(np.mean(a * b))
+    reason: str
 
 
 def refine_best_1_or_2_bars(
-    wav_path: str,
-    window_start: float,
-    window_end: float,
-    beats_per_bar: int = 4,
-    prefer_bars: int = 1,
-    sr: int = 22050,
-) -> RefineResult:
-    try:
-        y, sr = librosa.load(wav_path, sr=sr, mono=True)
-        dur = len(y) / sr
-        ws = max(0.0, float(window_start))
-        we = min(dur, float(window_end))
-        if (we - ws) < 2.0:
-            return RefineResult(False, ws, we, 0.0, 0, 0.0, "window_too_short")
+    wav_path,
+    window_start,
+    window_end,
+    beats_per_bar=4,
+    prefer_bars=1,
+    sr=22050,
+):
+    y, sr = librosa.load(wav_path, sr=sr)
+    y = y[int(window_start * sr): int(window_end * sr)]
 
-        y_seg = y[int(ws * sr): int(we * sr)]
-        if len(y_seg) < sr:
-            return RefineResult(False, ws, we, 0.0, 0, 0.0, "segment_too_short")
+    if len(y) < sr:
+        return RefineResult(False, 0, 0, 0, 0, 0, "too short")
 
-        tempo, beats = librosa.beat.beat_track(y=y_seg, sr=sr)
-        bpm = float(tempo or 0.0)
-        beat_times = librosa.frames_to_time(beats, sr=sr) + ws
+    tempo, beats = librosa.beat.beat_track(y=y, sr=sr)
 
-        if len(beat_times) < beats_per_bar * 2:
-            return RefineResult(False, ws, we, bpm, 0, 0.0, "not_enough_beats")
+    if len(beats) < beats_per_bar:
+        return RefineResult(False, 0, 0, tempo, 0, 0, "not enough beats")
 
-        candidates = []
-        for bars in (1, 2):
-            beats_needed = bars * int(beats_per_bar)
-            for i in range(0, len(beat_times) - beats_needed):
-                a = float(beat_times[i])
-                b = float(beat_times[i + beats_needed])
-                if a < ws or b > we:
-                    continue
+    bars = prefer_bars
+    beats_needed = beats_per_bar * bars
 
-                sim = _boundary_similarity(y, sr, a, b)
-                seg = y[int(a * sr): int(b * sr)]
-                e = float(np.mean(seg ** 2))
-                score = (2.2 * sim) + (0.6 * np.tanh(12 * e))
-                if bars == int(prefer_bars):
-                    score += 0.15
-                candidates.append((score, a, b, bars))
+    if len(beats) < beats_needed:
+        return RefineResult(False, 0, 0, tempo, 0, 0, "not enough beats for bars")
 
-        if not candidates:
-            return RefineResult(False, ws, we, bpm, 0, 0.0, "no_candidates")
+    start_frame = beats[0]
+    end_frame = beats[beats_needed - 1]
 
-        candidates.sort(key=lambda x: x[0], reverse=True)
-        score, a, b, bars = candidates[0]
-        return RefineResult(True, a, b, bpm, int(bars), float(score), "")
+    start = librosa.frames_to_time(start_frame, sr=sr)
+    end = librosa.frames_to_time(end_frame, sr=sr)
 
-    except Exception as e:
-        return RefineResult(False, window_start, window_end, 0.0, 0, 0.0, f"error:{e}")
+    score = float(tempo / 200.0)
+
+    return RefineResult(True, start, end, tempo, bars, score, "")
