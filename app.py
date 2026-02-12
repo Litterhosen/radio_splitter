@@ -21,7 +21,6 @@ from jingle_finder import jingle_score
 from hook_finder import (
     ffmpeg_to_wav16k_mono,
     find_hooks,
-    refine_loops_within_window,
 )
 
 from beat_refine import refine_best_1_or_2_bars
