@@ -107,7 +107,7 @@ DEFAULTS = {
     # Naming/export
     "use_slug": True,
     "slug_words": 6,
-    "export_format": "wav (16000 mono)",
+    "export_format": "mp3 (192k)",
 
     # Downloads
     "downloaded_files": [],
