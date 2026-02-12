@@ -21,7 +21,6 @@ from jingle_finder import jingle_score
 from hook_finder import (
     ffmpeg_to_wav16k_mono,
     find_hooks,
-    find_chorus_windows,
     refine_loops_within_window,
 )
 
