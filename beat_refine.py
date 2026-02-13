@@ -29,15 +29,20 @@ def refine_best_1_or_2_bars(
         return RefineResult(False, 0, 0, 0, 0, 0, "too short")
 
     tempo, beats = librosa.beat.beat_track(y=y, sr=sr)
+    
+    # Handle numpy array return from newer librosa
+    if hasattr(tempo, '__len__'):
+        tempo = tempo[0] if len(tempo) > 0 else 120.0
+    bpm = int(round(float(tempo)))
 
     if len(beats) < beats_per_bar:
-        return RefineResult(False, 0, 0, tempo, 0, 0, "not enough beats")
+        return RefineResult(False, 0, 0, bpm, 0, 0, "not enough beats")
 
     bars = prefer_bars
     beats_needed = beats_per_bar * bars
 
     if len(beats) < beats_needed:
-        return RefineResult(False, 0, 0, tempo, 0, 0, "not enough beats for bars")
+        return RefineResult(False, 0, 0, bpm, 0, 0, "not enough beats for bars")
 
     start_frame = beats[0]
     end_frame = beats[beats_needed - 1]
@@ -45,6 +50,6 @@ def refine_best_1_or_2_bars(
     start = librosa.frames_to_time(start_frame, sr=sr)
     end = librosa.frames_to_time(end_frame, sr=sr)
 
-    score = float(tempo / 200.0)
+    score = float(bpm / 200.0)
 
-    return RefineResult(True, start, end, tempo, bars, score, "")
+    return RefineResult(True, start, end, bpm, bars, score, "")
