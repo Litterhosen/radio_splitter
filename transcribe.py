@@ -3,6 +3,9 @@ from typing import Optional, Dict, Any
 
 from faster_whisper import WhisperModel
 
+# Supported languages for explicit transcription
+SUPPORTED_LANGUAGES = ("da", "en")
+
 
 @dataclass
 class WhisperState:
@@ -25,7 +28,7 @@ def transcribe_wav(model: WhisperModel, wav_path, language: Optional[str] = None
     Args:
         language: None for auto-detect, "da" for Danish, "en" for English
     """
-    lang_arg = language if language in ("da", "en") else None
+    lang_arg = language if language in SUPPORTED_LANGUAGES else None
     segments, info = model.transcribe(
         str(wav_path),
         language=lang_arg,

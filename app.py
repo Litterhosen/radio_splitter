@@ -31,6 +31,11 @@ from utils import ensure_dir, hhmmss_ms, safe_slug
 OUTPUT_ROOT = Path("output")
 ensure_dir(OUTPUT_ROOT)
 
+# Anti-overlap and filter thresholds
+OVERLAP_THRESHOLD = 0.30  # 30% overlap threshold for duplicate detection
+MIN_DURATION_SECONDS = 4.0  # Minimum clip duration
+DECAY_TAIL_DURATION = 0.75  # Extra audio tail for loops (seconds)
+
 MODE_OPTIONS = [
     "🎵 Song Hunter (Loops)",
     "📻 Broadcast Hunter (Mix)",
@@ -118,13 +123,13 @@ def anti_overlap_keep_best(candidates: List[Dict]) -> List[Dict]:
     kept = []
     for item in sorted(candidates, key=lambda x: float(x["score"]), reverse=True):
         rng = (float(item["start"]), float(item["end"]))
-        if any(overlap_ratio(rng, (float(k["start"]), float(k["end"]))) > 0.30 for k in kept):
+        if any(overlap_ratio(rng, (float(k["start"]), float(k["end"]))) > OVERLAP_THRESHOLD for k in kept):
             continue
         kept.append(item)
     return kept
 
 
-def filter_by_duration(candidates: List[Dict], min_duration: float = 4.0) -> List[Dict]:
+def filter_by_duration(candidates: List[Dict], min_duration: float = MIN_DURATION_SECONDS) -> List[Dict]:
     """Filter out candidates shorter than min_duration seconds"""
     return [c for c in candidates if (float(c["end"]) - float(c["start"])) >= min_duration]
 
@@ -156,17 +161,21 @@ def export_clip_with_tail(
     want_format: str,
     add_tail: bool = True
 ) -> Path:
-    """Export clip with optional 0.75s decay tail"""
-    tail_duration = 0.75 if add_tail else 0.0
+    """Export clip with optional decay tail"""
+    tail_duration = DECAY_TAIL_DURATION if add_tail else 0.0
     b_with_tail = b + tail_duration
     
-    if want_format.startswith("wav"):
-        outp = session_dir / f"{stem}_tail.wav" if add_tail else session_dir / f"{stem}.wav"
-        cut_segment_to_wav(in_path, outp, a, b_with_tail)
-        return outp
+    # Determine file extension and suffix
+    is_wav = want_format.startswith("wav")
+    ext = "wav" if is_wav else "mp3"
+    suffix = "_tail" if add_tail else ""
+    outp = session_dir / f"{stem}{suffix}.{ext}"
     
-    outp = session_dir / f"{stem}_tail.mp3" if add_tail else session_dir / f"{stem}.mp3"
-    cut_segment_to_mp3(in_path, outp, a, b_with_tail, bitrate="192k")
+    if is_wav:
+        cut_segment_to_wav(in_path, outp, a, b_with_tail)
+    else:
+        cut_segment_to_mp3(in_path, outp, a, b_with_tail, bitrate="192k")
+    
     return outp
 
 
@@ -241,6 +250,11 @@ else:
     st.sidebar.subheader("🎵 Hook Detection")
     st.sidebar.slider("Min hook length (sec)", 2.0, 30.0, step=0.5, key="hook_len_range_min", value=4.0)
     st.sidebar.slider("Max hook length (sec)", 2.0, 30.0, step=0.5, key="hook_len_range_max", value=15.0)
+    
+    # Validate that min <= max
+    if st.session_state["hook_len_range_min"] > st.session_state["hook_len_range_max"]:
+        st.sidebar.error("⚠️ Min hook length cannot exceed max hook length")
+    
     st.sidebar.slider("Preferred length (sec)", 2.0, 20.0, step=0.5, key="prefer_len")
     st.sidebar.slider("Scan hop (sec)", 0.25, 5.0, step=0.25, key="hook_hop")
     st.sidebar.slider("Top N hooks", 3, 30, step=1, key="hook_topn")
