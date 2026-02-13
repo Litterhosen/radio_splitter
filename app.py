@@ -1,28 +1,16 @@
+# CRITICAL: st.set_page_config MUST be the VERY FIRST Streamlit call
+import streamlit as st
+st.set_page_config(page_title="The Sample Machine", layout="wide")
+
 import io
 import json
 import zipfile
-import os
-import subprocess
 from pathlib import Path
+from typing import List, Dict, Any
 
 import pandas as pd
-import streamlit as st
 
-# Helper to ensure directories exist
-def ensure_dir(path: Path):
-    path.mkdir(parents=True, exist_ok=True)
-    return path
-
-# Helper for formatting time
-def hhmmss_ms(seconds: float) -> str:
-    m, s = divmod(seconds, 60)
-    h, m = divmod(m, 60)
-    return f"{int(h):02d}:{int(m):02d}:{s:06.3f}"
-
-# Helper for slugify
-def safe_slug(text: str) -> str:
-    return "".join([c if c.isalnum() else "_" for c in text]).strip("_")
-
+# Local imports
 from audio_split import (
     detect_non_silent_intervals,
     fixed_length_intervals,
@@ -33,120 +21,116 @@ from transcribe import load_model, transcribe_wav
 from downloaders import download_audio
 from tagging import auto_tags
 from jingle_finder import jingle_score
-
-from hook_finder import (
-    ffmpeg_to_wav16k_mono,
-    find_hooks,
-)
-
+from hook_finder import ffmpeg_to_wav16k_mono, find_hooks
 from beat_refine import refine_best_1_or_2_bars
-
+from utils import ensure_dir, hhmmss_ms, safe_slug
 
 # ----------------------------
-# Config / helpers
+# Constants and Config
 # ----------------------------
-st.set_page_config(page_title="Radio Splitter + Whisper", layout="wide")
-
 OUTPUT_ROOT = Path("output")
 ensure_dir(OUTPUT_ROOT)
 
 MODE_OPTIONS = [
-    "Radio/tale (split på stilhed)",
-    "Jingles/mikro (fast length 6–12s)",
-    "Song: Find hooks/loops (4–15s)",
-    "Song: Chorus-aware (30–45s → hooks/loops)",
+    "🎵 Song Hunter (Loops)",
+    "📻 Broadcast Hunter (Mix)",
 ]
 
+# Bilingual theme keywords (DA + EN)
+THEMES = {
+    "THEME:TIME": ["tid", "evighed", "nu", "time", "eternity", "now"],
+    "THEME:MEMORY": ["huske", "glemme", "remember", "forget", "back"],
+    "THEME:DREAM": ["drøm", "natten", "dream", "night", "sleep"],
+    "THEME:EXISTENTIAL": ["livet", "verden", "cirkel", "life", "world", "circle"],
+    "THEME:META": ["radio", "musik", "stemme", "lyd", "music", "voice", "sound"],
+}
 
 DEFAULTS = {
-    # UI/state
     "mode": MODE_OPTIONS[0],
-    "mode_ui": MODE_OPTIONS[0],
-    "_pending": None,
-
-    # Whisper
     "model_size": "small",
-    "language": "da",
+    "whisper_language_ui": "Auto",
     "device": "cpu",
     "compute_type": "int8",
-    "whisper_on_hooks": False,
-
-    # Radio split
     "noise_db": -35.0,
     "min_silence_s": 0.7,
     "pad_s": 0.15,
     "min_segment_s": 1.2,
-
-    # Fixed split (jingles)
     "fixed_len": 8.0,
-
-    # Hooks
-    "hook_len_range": (4.0, 15.0),
+    "hook_len_range_min": 4.0,
+    "hook_len_range_max": 15.0,
     "prefer_len": 8.0,
     "hook_hop": 1.0,
     "hook_topn": 12,
     "hook_gap": 2.0,
-
-    # Chorus-aware
-    "chorus_len_range": (30.0, 45.0),
+    "chorus_len_range_min": 30.0,
+    "chorus_len_range_max": 45.0,
     "chorus_hop": 2.0,
     "chorus_topn": 4,
     "chorus_gap": 8.0,
     "loops_per_chorus": 10,
-
-    # Beat refine (1–2 bars)
     "beat_refine": True,
     "beats_per_bar": 4,
-    "prefer_bars": 1,        # 1 or 2
-    "try_both_bars": True,    # choose best
-
-    # Jingle filter
-    "jingle_mode": False,
-    "min_score": 0.0,
-
-    # Naming/export
+    "prefer_bars": 1,
+    "try_both_bars": True,
     "use_slug": True,
     "slug_words": 6,
     "export_format": "mp3 (192k)",
-
-    # Downloads
     "downloaded_files": [],
 }
 
 for k, v in DEFAULTS.items():
     st.session_state.setdefault(k, v)
 
-
-def apply_pending_updates_before_widgets():
-    """
-    Streamlit-regel:
-    Du må IKKE ændre st.session_state.<widget_key> efter widget er oprettet.
-    Derfor bruger vi _pending og anvender den KUN i starten (før widgets).
-    """
-    pending = st.session_state.get("_pending")
-    if isinstance(pending, dict) and pending:
-        for k, v in pending.items():
-            st.session_state[k] = v
-        st.session_state["_pending"] = None
+# ----------------------------
+# Helper Functions
+# ----------------------------
+def get_whisper_language():
+    """Convert UI language to whisper language code"""
+    mapping = {"Auto": None, "Dansk": "da", "English": "en"}
+    return mapping.get(st.session_state["whisper_language_ui"], None)
 
 
-apply_pending_updates_before_widgets()
+def detect_themes(text: str) -> List[str]:
+    """Scan transcript for bilingual theme keywords"""
+    text_lower = (text or "").lower()
+    found = []
+    for theme, keywords in THEMES.items():
+        if any(kw in text_lower for kw in keywords):
+            found.append(theme)
+    return found
 
 
-def request_preset(preset: dict):
-    """
-    Sætter _pending (safe) og rerunner.
-    _pending anvendes i starten af næste run (før widgets), så ingen session_state-crash.
-    """
-    st.session_state["_pending"] = preset
-    st.rerun()
+def overlap_ratio(a: tuple, b: tuple) -> float:
+    """Calculate overlap ratio between two intervals"""
+    left = max(a[0], b[0])
+    right = min(a[1], b[1])
+    if right <= left:
+        return 0.0
+    intersection = right - left
+    shortest = min(a[1] - a[0], b[1] - b[0])
+    if shortest <= 0:
+        return 0.0
+    return intersection / shortest
 
 
-def language_value():
-    return None if st.session_state["language"] == "auto" else st.session_state["language"]
+def anti_overlap_keep_best(candidates: List[Dict]) -> List[Dict]:
+    """Remove overlapping candidates, keeping the highest scoring ones"""
+    kept = []
+    for item in sorted(candidates, key=lambda x: float(x["score"]), reverse=True):
+        rng = (float(item["start"]), float(item["end"]))
+        if any(overlap_ratio(rng, (float(k["start"]), float(k["end"]))) > 0.30 for k in kept):
+            continue
+        kept.append(item)
+    return kept
 
 
-def save_input_to_session_dir(src_type, name_or_path, maybe_bytes):
+def filter_by_duration(candidates: List[Dict], min_duration: float = 4.0) -> List[Dict]:
+    """Filter out candidates shorter than min_duration seconds"""
+    return [c for c in candidates if (float(c["end"]) - float(c["start"])) >= min_duration]
+
+
+def save_input_to_session_dir(src_type: str, name_or_path: str, maybe_bytes):
+    """Save uploaded or downloaded file to session directory"""
     if src_type == "upload":
         in_name = name_or_path
         session_dir = ensure_dir(OUTPUT_ROOT / Path(in_name).stem)
@@ -163,37 +147,36 @@ def save_input_to_session_dir(src_type, name_or_path, maybe_bytes):
     return local_in, session_dir, in_name
 
 
-def export_clip(in_path: Path, session_dir: Path, stem: str, a: float, b: float, want_format: str) -> Path:
-    wav_tmp = session_dir / f"{stem}__tmp.wav"
-    cut_segment_to_wav(in_path, wav_tmp, a, b)
-
+def export_clip_with_tail(
+    in_path: Path, 
+    session_dir: Path, 
+    stem: str, 
+    a: float, 
+    b: float, 
+    want_format: str,
+    add_tail: bool = True
+) -> Path:
+    """Export clip with optional 0.75s decay tail"""
+    tail_duration = 0.75 if add_tail else 0.0
+    b_with_tail = b + tail_duration
+    
     if want_format.startswith("wav"):
-        outp = session_dir / f"{stem}.wav"
-        if outp.exists():
-            outp.unlink()
-        wav_tmp.rename(outp)
+        outp = session_dir / f"{stem}_tail.wav" if add_tail else session_dir / f"{stem}.wav"
+        cut_segment_to_wav(in_path, outp, a, b_with_tail)
         return outp
-
-    outp = session_dir / f"{stem}.mp3"
-    cut_segment_to_mp3(in_path, outp, a, b, bitrate="192k")
-    try:
-        wav_tmp.unlink()
-    except Exception:
-        pass
+    
+    outp = session_dir / f"{stem}_tail.mp3" if add_tail else session_dir / f"{stem}.mp3"
+    cut_segment_to_mp3(in_path, outp, a, b_with_tail, bitrate="192k")
     return outp
 
 
 def maybe_refine_barloop(wav_for_analysis: Path, a: float, b: float):
-    """
-    Returnerer:
-    (start, end, bpm, bars, refine_score, refined_ok, reason)
-    """
+    """Refine loop to beat grid if enabled"""
     if not st.session_state["beat_refine"]:
-        return a, b, 0.0, 0, 0.0, False, "disabled"
+        return a, b, 0, 0, 0.0, False, "disabled"
 
     beats_per_bar = int(st.session_state["beats_per_bar"])
     prefer_bars = int(st.session_state["prefer_bars"])
-    try_both = bool(st.session_state["try_both_bars"])
 
     rr = refine_best_1_or_2_bars(
         str(wav_for_analysis),
@@ -204,164 +187,104 @@ def maybe_refine_barloop(wav_for_analysis: Path, a: float, b: float):
         sr=22050,
     )
 
-    if rr.ok and try_both:
-        return rr.start, rr.end, rr.bpm, rr.bars, rr.score, True, ""
-
-    # Hvis try_both er off: vi bruger stadig refine_best_1_or_2_bars for enkelhed,
-    # men resultatet bliver ofte samme. (Godt nok i praksis.)
     if rr.ok and (rr.end - rr.start) > 0.5:
-        return rr.start, rr.end, rr.bpm, rr.bars, rr.score, True, ""
+        # Fix double-offset bug: use original window_start as base
+        return (
+            float(a) + rr.start,
+            float(a) + rr.end,
+            rr.bpm,
+            rr.bars,
+            rr.score,
+            True,
+            ""
+        )
 
     return a, b, rr.bpm, rr.bars, rr.score, False, rr.reason
 
 
 # ----------------------------
-# UI
+# UI - Title and Description
 # ----------------------------
-st.title("Radio Splitter + Whisper (gratis, lokalt)")
-st.caption("Upload/Link → split / hooks → (valgfri whisper) → vælg → eksportér ZIP")
+st.title("🎛️ The Sample Machine")
+st.caption("Bilingual audio splitter with whisper transcription, hook detection, and theme tagging")
 
-# Sidebar
-st.sidebar.header("Indstillinger")
+# ----------------------------
+# UI - Sidebar Settings
+# ----------------------------
+st.sidebar.header("⚙️ Settings")
 
-mode_idx = MODE_OPTIONS.index(st.session_state["mode_ui"]) if st.session_state["mode_ui"] in MODE_OPTIONS else 0
-st.sidebar.selectbox("Mode", MODE_OPTIONS, index=mode_idx, key="mode_ui")
+# Mode selection
+mode_idx = MODE_OPTIONS.index(st.session_state["mode"]) if st.session_state["mode"] in MODE_OPTIONS else 0
+st.session_state["mode"] = st.sidebar.selectbox("Mode", MODE_OPTIONS, index=mode_idx)
 
-# hold internal mode in sync (safe: we are not writing to mode_ui)
-st.session_state["mode"] = st.session_state["mode_ui"]
-
-st.sidebar.subheader("Whisper")
-st.sidebar.selectbox("Whisper-model", ["tiny", "base", "small", "medium"], key="model_size")
-st.sidebar.selectbox("Sprog", ["da", "en", "auto"], key="language")
+# Whisper settings
+st.sidebar.subheader("🎙️ Whisper")
+st.sidebar.selectbox("Model size", ["tiny", "base", "small", "medium"], key="model_size")
+st.sidebar.selectbox("Language", ["Auto", "Dansk", "English"], key="whisper_language_ui")
 st.sidebar.selectbox("Device", ["cpu"], key="device")
 st.sidebar.selectbox("Compute type", ["int8", "float32"], key="compute_type")
 
-st.sidebar.subheader("Navngivning")
-st.sidebar.checkbox("Tilføj slug fra transskription", key="use_slug")
-st.sidebar.slider("Slug ord (ca.)", 2, 12, key="slug_words")
+# Export settings
+st.sidebar.subheader("📤 Export")
+st.sidebar.selectbox("Format", ["wav (16000 mono)", "mp3 (192k)"], key="export_format")
+st.sidebar.checkbox("Add slug from transcript", key="use_slug")
+st.sidebar.slider("Slug words", 2, 12, key="slug_words")
 
-st.sidebar.subheader("Eksport")
-st.sidebar.selectbox("Klipformat", ["wav (16000 mono)", "mp3 (192k)"], key="export_format")
-
-# Radio
-st.sidebar.subheader("Radio/tale: split på stilhed")
-st.sidebar.slider("Silence threshold (dB)", -60.0, -10.0, step=1.0, key="noise_db")
-st.sidebar.slider("Min stilhed (sek)", 0.2, 2.0, step=0.1, key="min_silence_s")
-st.sidebar.slider("Padding før/efter (sek)", 0.0, 1.0, step=0.05, key="pad_s")
-st.sidebar.slider("Min kliplængde (sek)", 0.5, 10.0, step=0.1, key="min_segment_s")
-
-# Fixed
-st.sidebar.subheader("Jingles/mikro: fast length")
-st.sidebar.slider("Klip-længde (sek)", 2.0, 60.0, step=1.0, key="fixed_len")
-
-# Hooks
-st.sidebar.subheader("Song hooks/loops")
-st.sidebar.slider("Hook-længde (sek)", 2.0, 30.0, step=0.5, key="hook_len_range")
-st.sidebar.slider("Foretrukket længde (sek)", 2.0, 20.0, step=0.5, key="prefer_len")
-st.sidebar.slider("Scan-hop (sek)", 0.25, 5.0, step=0.25, key="hook_hop")
-st.sidebar.slider("Antal hook-forslag", 3, 30, step=1, key="hook_topn")
-st.sidebar.slider("Min afstand mellem hooks (sek)", 0.0, 10.0, step=0.5, key="hook_gap")
-st.sidebar.checkbox("Transskriber hooks (langsommere)", key="whisper_on_hooks")
-
-# Chorus-aware
-st.sidebar.subheader("Chorus-aware")
-st.sidebar.slider("Chorus-længde (sek)", 15.0, 90.0, step=1.0, key="chorus_len_range")
-st.sidebar.slider("Chorus scan-hop (sek)", 1.0, 6.0, step=0.5, key="chorus_hop")
-st.sidebar.slider("Antal chorus-vinduer", 1, 8, step=1, key="chorus_topn")
-st.sidebar.slider("Min afstand mellem chorus (sek)", 0.0, 30.0, step=1.0, key="chorus_gap")
-st.sidebar.slider("Loops pr chorus", 3, 20, step=1, key="loops_per_chorus")
-
-# Beat refine
-st.sidebar.subheader("Beat-grid: 1–2 bar perfekte loops")
-st.sidebar.checkbox("Refine hooks/loops til beat-grid", key="beat_refine")
-st.sidebar.number_input("Beats per bar (standard 4)", min_value=3, max_value=7, step=1, key="beats_per_bar")
-prefer_txt = "1 bar" if int(st.session_state["prefer_bars"]) == 1 else "2 bars"
-prefer_ui = st.sidebar.radio("Foretræk loop-længde", ["1 bar", "2 bars"], index=0 if prefer_txt == "1 bar" else 1)
-st.session_state["prefer_bars"] = 1 if prefer_ui == "1 bar" else 2
-st.sidebar.checkbox("Prøv både 1 og 2 bars (vælg bedste)", key="try_both_bars")
-st.sidebar.caption(
-    "Til musik: snapper loop start/slut til beats og giver præcis 1–2 bars loops.\n"
-    "Hvis tempo er ustabilt (rubato), kan den falde tilbage til dit hook."
-)
-
-# Jingle filter
-st.sidebar.subheader("Jingle-mode")
-st.sidebar.checkbox("Find jingles (sortér + filter)", key="jingle_mode")
-st.sidebar.slider("Min jingle score (filter)", 0.0, 10.0, step=0.25, key="min_score")
-
-# Quick preset buttons (SAFE via request_preset)
-st.sidebar.subheader("Presets (hurtigt)")
-c1, c2 = st.sidebar.columns(2)
-
-with c1:
-    if st.button("Preset: Radio", use_container_width=True):
-        request_preset({
-            "mode_ui": "Radio/tale (split på stilhed)",
-            "mode": "Radio/tale (split på stilhed)",
-            "noise_db": -35.0,
-            "min_silence_s": 0.7,
-            "pad_s": 0.15,
-            "min_segment_s": 1.2,
-            "jingle_mode": False,
-            "beat_refine": False,
-            "whisper_on_hooks": False,
-            "model_size": "small",
-            "language": "da",
-        })
-
-with c2:
-    if st.button("Preset: Chorus", use_container_width=True):
-        request_preset({
-            "mode_ui": "Song: Chorus-aware (30–45s → hooks/loops)",
-            "mode": "Song: Chorus-aware (30–45s → hooks/loops)",
-            "hook_len_range": (4.0, 15.0),
-            "prefer_len": 8.0,
-            "hook_hop": 1.0,
-            "hook_topn": 12,
-            "hook_gap": 2.0,
-            "chorus_len_range": (30.0, 45.0),
-            "chorus_hop": 2.0,
-            "chorus_topn": 4,
-            "chorus_gap": 8.0,
-            "loops_per_chorus": 10,
-            "beat_refine": True,
-            "beats_per_bar": 4,
-            "prefer_bars": 1,
-            "try_both_bars": True,
-            "whisper_on_hooks": False,
-            "jingle_mode": False,
-            "model_size": "small",
-            "language": "da",
-        })
-
+# Mode-specific settings
+if st.session_state["mode"] == "📻 Broadcast Hunter (Mix)":
+    st.sidebar.subheader("📻 Broadcast Split")
+    st.sidebar.slider("Silence threshold (dB)", -60.0, -10.0, step=1.0, key="noise_db")
+    st.sidebar.slider("Min silence (sec)", 0.2, 2.0, step=0.1, key="min_silence_s")
+    st.sidebar.slider("Padding (sec)", 0.0, 1.0, step=0.05, key="pad_s")
+    st.sidebar.slider("Min segment (sec)", 0.5, 10.0, step=0.1, key="min_segment_s")
+else:
+    st.sidebar.subheader("🎵 Hook Detection")
+    st.sidebar.slider("Min hook length (sec)", 2.0, 30.0, step=0.5, key="hook_len_range_min", value=4.0)
+    st.sidebar.slider("Max hook length (sec)", 2.0, 30.0, step=0.5, key="hook_len_range_max", value=15.0)
+    st.sidebar.slider("Preferred length (sec)", 2.0, 20.0, step=0.5, key="prefer_len")
+    st.sidebar.slider("Scan hop (sec)", 0.25, 5.0, step=0.25, key="hook_hop")
+    st.sidebar.slider("Top N hooks", 3, 30, step=1, key="hook_topn")
+    st.sidebar.slider("Min gap between hooks (sec)", 0.0, 10.0, step=0.5, key="hook_gap")
+    
+    st.sidebar.subheader("🎼 Beat Refinement")
+    st.sidebar.checkbox("Refine to beat grid", key="beat_refine")
+    st.sidebar.number_input("Beats per bar", min_value=3, max_value=7, step=1, key="beats_per_bar")
+    st.sidebar.radio("Preferred loop length", ["1 bar", "2 bars"], key="prefer_bars_ui")
+    st.session_state["prefer_bars"] = 1 if st.session_state.get("prefer_bars_ui", "1 bar") == "1 bar" else 2
+    st.sidebar.checkbox("Try both (choose best)", key="try_both_bars")
 
 # ----------------------------
-# Input: link download
+# UI - Input Tabs
 # ----------------------------
-st.subheader("A) Indsæt link (Ctrl+V) og download lyd")
-url = st.text_input("Link", placeholder="https://... (YouTube / Archive / etc.)")
+st.subheader("📥 Input")
+tab_upload, tab_link = st.tabs(["📂 Upload Filer", "🔗 Hent fra Link"])
 
-dl_col1, dl_col2 = st.columns([1, 3])
-with dl_col1:
-    dl_btn = st.button("Download", type="primary", disabled=not url.strip())
-with dl_col2:
-    st.caption("Gemmer i: output/Downloads/")
+with tab_upload:
+    files = st.file_uploader(
+        "Upload MP3/WAV files",
+        type=["mp3", "wav"],
+        accept_multiple_files=True,
+        help="Select one or more audio files"
+    )
 
-if dl_btn:
-    try:
-        with st.spinner("Downloader..."):
-            p = download_audio(url.strip(), OUTPUT_ROOT / "Downloads")
-        st.success(f"Downloaded: {p.name}")
-        st.session_state["downloaded_files"] = list(st.session_state.get("downloaded_files", [])) + [str(p)]
-    except Exception as e:
-        st.error(f"Download fejl: {e}")
+with tab_link:
+    url = st.text_input("URL", placeholder="https://... (YouTube, Archive, etc.)")
+    dl_col1, dl_col2 = st.columns([1, 3])
+    with dl_col1:
+        dl_btn = st.button("Download", type="primary", disabled=not url.strip())
+    with dl_col2:
+        st.caption("Downloads to: output/Downloads/")
+    
+    if dl_btn:
+        try:
+            with st.spinner("Downloading..."):
+                p = download_audio(url.strip(), OUTPUT_ROOT / "Downloads")
+            st.success(f"✅ Downloaded: {p.name}")
+            st.session_state["downloaded_files"] = list(st.session_state.get("downloaded_files", [])) + [str(p)]
+        except Exception as e:
+            st.error(f"❌ Download error: {e}")
 
-# ----------------------------
-# Input: upload
-# ----------------------------
-st.subheader("B) Upload MP3/WAV (du kan vælge flere)")
-files = st.file_uploader("Upload", type=["mp3", "wav"], accept_multiple_files=True)
-
+# Prepare input paths
 input_paths = []
 if files:
     for uf in files:
@@ -370,202 +293,180 @@ for p in st.session_state.get("downloaded_files", []):
     input_paths.append(("path", p, None))
 
 # ----------------------------
-# Actions
+# UI - Actions
 # ----------------------------
+st.divider()
 if "model" not in st.session_state:
     st.session_state.model = None
 
-colA, colB, colC = st.columns([1, 1, 1])
-with colA:
-    load_btn = st.button("Load Whisper-model", type="primary")
-with colB:
-    run_btn = st.button("Process", type="primary", disabled=not input_paths)
-with colC:
-    auto_btn = st.button("Analyze → auto-sæt preset", disabled=not input_paths)
+col1, col2 = st.columns([1, 1])
+with col1:
+    load_btn = st.button("🔧 Load Whisper Model", type="secondary", use_container_width=True)
+with col2:
+    run_btn = st.button("▶️ Process", type="primary", disabled=not input_paths, use_container_width=True)
 
 if load_btn:
     try:
-        with st.spinner("Loader model... (første gang downloader den)"):
+        with st.spinner("Loading model... (first time downloads it)"):
             st.session_state.model = load_model(
                 model_size=st.session_state["model_size"],
                 device=st.session_state["device"],
                 compute_type=st.session_state["compute_type"],
             )
-        st.success("Model loaded.")
+        st.success("✅ Model loaded successfully!")
     except Exception as e:
-        st.error(f"Kunne ikke loade model: {e}")
-
-if auto_btn and input_paths:
-    st.info("Analyserer første fil og auto-sætter mode + sliders...")
-    src_type, name_or_path, maybe_bytes = input_paths[0]
-    in_path, session_dir, in_name = save_input_to_session_dir(src_type, name_or_path, maybe_bytes)
-
-    # Heuristik: hvis den ser ud som "én lang non-silent" => musik
-    intervals = detect_non_silent_intervals(in_path, noise_db=-35.0, min_silence_s=0.7, pad_s=0.0, min_segment_s=1.0)
-    looks_like_song = (len(intervals) == 1 and (intervals[0][1] - intervals[0][0]) > 60.0)
-
-    if looks_like_song:
-        request_preset({
-            "mode_ui": "Song: Chorus-aware (30–45s → hooks/loops)",
-            "mode": "Song: Chorus-aware (30–45s → hooks/loops)",
-            "beat_refine": True,
-            "whisper_on_hooks": False,
-            "jingle_mode": False,
-            "model_size": "small",
-            "language": "da",
-        })
-    else:
-        request_preset({
-            "mode_ui": "Radio/tale (split på stilhed)",
-            "mode": "Radio/tale (split på stilhed)",
-            "beat_refine": False,
-            "whisper_on_hooks": True,
-            "jingle_mode": False,
-            "model_size": "small",
-            "language": "da",
-        })
-
-
+        st.error(f"❌ Could not load model: {e}")
 
 # ----------------------------
-# Processing
+# Processing Logic
 # ----------------------------
 if run_btn:
     mode_now = st.session_state["mode"]
-
-    needs_whisper = True
-    if mode_now in ("Song: Find hooks/loops (4–15s)", "Song: Chorus-aware (30–45s → hooks/loops)"):
-        if not st.session_state["whisper_on_hooks"]:
-            needs_whisper = False
-
-    if needs_whisper and st.session_state.model is None:
-        st.warning("⚠️ Husk at klikke 'Load Whisper-model' først!")
+    
+    # Check if model is needed and loaded
+    if st.session_state.model is None:
+        st.warning("⚠️ Please click 'Load Whisper Model' first!")
         st.stop()
     
-    # ------------------ PROGRESS BAR SECTION START ------------------
-    # Vi bruger en status container der kan opdateres
-    with st.status("🚀 Starter op...", expanded=True) as status:
+    with st.status("🚀 Starting processing...", expanded=True) as status:
         results = []
-        lang = language_value()
-        
+        lang = get_whisper_language()
         total_files = len(input_paths)
 
         for idx_file, (src_type, name_or_path, maybe_bytes) in enumerate(input_paths):
-            # Opdater status-boksens titel så man kan se hvor langt vi er
-            status.update(label=f"📦 Behandler fil {idx_file+1} af {total_files}: {name_or_path if isinstance(name_or_path, str) else 'Upload'}", state="running")
+            status.update(
+                label=f"📦 Processing file {idx_file+1} of {total_files}",
+                state="running"
+            )
             
-            st.write(f"### Fil {idx_file+1}/{total_files}: {name_or_path}")
-
-            # TRIN 1: Konvertering
+            st.write(f"### File {idx_file+1}/{total_files}: {name_or_path}")
+            
+            # Step 1: Save and convert to analysis format
             in_path, session_dir, in_name = save_input_to_session_dir(src_type, name_or_path, maybe_bytes)
-            st.write("⏳ Konverterer lydfil til format til analyse...")
+            st.write("⏳ Converting audio...")
             wav16 = session_dir / "_analysis_16k_mono.wav"
             ffmpeg_to_wav16k_mono(in_path, wav16)
-            st.write("✅ Konvertering færdig.")
-
-            # ---------------- Song: hooks only ----------------
-            if mode_now == "Song: Find hooks/loops (4–15s)":
-                st.write("🧠 Analyserer musikken for at finde de bedste hooks (dette kan tage 10-30 sekunder)...")
+            st.write("✅ Conversion complete.")
+            
+            # ----------------------------
+            # Mode: Song Hunter (Loops)
+            # ----------------------------
+            if mode_now == "🎵 Song Hunter (Loops)":
+                st.write("🎵 Finding hooks...")
                 hooks = find_hooks(
                     wav16,
-                    hook_len_range=st.session_state["hook_len_range"],
+                    hook_len_range=(
+                        st.session_state["hook_len_range_min"],
+                        st.session_state["hook_len_range_max"]
+                    ),
                     prefer_len=st.session_state["prefer_len"],
                     hop_s=st.session_state["hook_hop"],
                     topn=st.session_state["hook_topn"],
                     min_gap_s=st.session_state["hook_gap"],
                 )
-                st.write(f"🎉 Fandt {len(hooks)} potentielle hooks! Nu finpudser jeg dem...")
-
-                total_hooks = len(hooks)
-                progress_bar = st.progress(0) # Visuel bar til underpunkter
-
-                for idx, h in enumerate(hooks, start=1):
-                    # Opdater bar
+                st.write(f"🎉 Found {len(hooks)} potential hooks!")
+                
+                # Convert to candidate format
+                candidates = []
+                for h in hooks:
+                    candidates.append({
+                        "start": float(h.start),
+                        "end": float(h.end),
+                        "score": float(h.score),
+                        "hook_score": float(h.score),
+                        "energy": float(h.energy),
+                        "loopability": float(h.loopability),
+                        "bpm": float(h.bpm),
+                    })
+                
+                # Apply 4-second filter
+                candidates = filter_by_duration(candidates, min_duration=4.0)
+                st.write(f"✂️ After 4s filter: {len(candidates)} hooks")
+                
+                # Apply anti-overlap
+                candidates = anti_overlap_keep_best(candidates)
+                st.write(f"🔄 After anti-overlap: {len(candidates)} hooks")
+                
+                # Process each hook
+                progress_bar = st.progress(0)
+                total_hooks = len(candidates)
+                
+                for idx, cand in enumerate(candidates, start=1):
                     progress_bar.progress(idx / total_hooks)
                     
-                    if idx % 2 == 0:
-                        st.write(f"   🔹 Behandler hook {idx}/{total_hooks}...")
-
-                    a, b = float(h.start), float(h.end)
-
+                    a, b = float(cand["start"]), float(cand["end"])
+                    
+                    # Beat refinement
                     a2, b2, bpm, bars, rscore, refined_ok, rreason = maybe_refine_barloop(wav16, a, b)
                     aa, bb = (a2, b2) if refined_ok else (a, b)
                     dur = max(0.0, bb - aa)
-
+                    
+                    # Transcribe
                     base = f"{idx:04d}_{hhmmss_ms(aa)}_to_{hhmmss_ms(bb)}"
-                    text = ""
-                    tjson = {"text": "", "segments": []}
-
-                    if st.session_state["whisper_on_hooks"]:
-                        st.write(f"      🎙️ Transskriberer tekst i hook {idx}...")
-                        wav_for_whisper = session_dir / f"{base}__whisper.wav"
-                        cut_segment_to_wav(in_path, wav_for_whisper, aa, bb)
-                        tjson = transcribe_wav(st.session_state.model, wav_for_whisper, language=lang or "da")
-                        text = (tjson.get("text") or "").strip()
-
+                    wav_for_whisper = session_dir / f"{base}__whisper.wav"
+                    cut_segment_to_wav(in_path, wav_for_whisper, aa, bb)
+                    tjson = transcribe_wav(st.session_state.model, wav_for_whisper, language=lang)
+                    text = (tjson.get("text") or "").strip()
+                    
+                    # Generate slug
                     slug = ""
                     if st.session_state["use_slug"] and text:
-                        slug = safe_slug(" ".join(text.split()[: int(st.session_state["slug_words"]) ]))
-
+                        slug = safe_slug(" ".join(text.split()[:int(st.session_state["slug_words"])]))
+                    
                     stem = f"{base}__{slug}" if slug else base
-                    clip_path = export_clip(in_path, session_dir, stem, aa, bb, st.session_state["export_format"])
-
+                    
+                    # Export with tail
+                    clip_path = export_clip_with_tail(
+                        in_path, session_dir, stem, aa, bb,
+                        st.session_state["export_format"],
+                        add_tail=True
+                    )
+                    
+                    # Save metadata
                     txt_path = session_dir / f"{stem}.txt"
                     json_path = session_dir / f"{stem}.json"
                     txt_path.write_text((text or "") + "\n", encoding="utf-8")
-                    json_path.write_text(json.dumps(tjson, ensure_ascii=False, indent=2), encoding="utf-8")
-
+                    json_path.write_text(
+                        json.dumps(tjson, ensure_ascii=False, indent=2),
+                        encoding="utf-8"
+                    )
+                    
+                    # Tags and themes
                     tags = ["musik", "hook"]
                     tags += [f"{bars}bar"] if refined_ok else ["unrefined"]
                     if text:
                         tags = list(set(tags + auto_tags(text)))
-
+                    themes = detect_themes(text)
+                    
                     results.append({
                         "source": in_name,
+                        "filename": clip_path.name,
                         "pick": True,
-                        "group": "hooks",
                         "clip": idx,
                         "start_sec": aa,
                         "end_sec": bb,
                         "dur_sec": dur,
-                        "tags": ", ".join(tags),
-                        "hook_score": float(h.score),
-                        "energy": float(h.energy),
-                        "loopability": float(h.loopability),
-                        "stability": float(h.stability),
+                        "bpm": int(bpm) if refined_ok else int(cand.get("bpm", 0)),
+                        "bars": int(bars) if refined_ok else 0,
                         "refined": bool(refined_ok),
-                        "refine_bpm": float(bpm or 0.0),
-                        "refine_bars": int(bars or 0),
-                        "refine_score": float(rscore or 0.0),
-                        "refine_reason": rreason,
-                        "jingle_score": 0.0,
+                        "tags": ", ".join(sorted(tags)),
+                        "themes": ", ".join(themes),
+                        "hook_score": cand.get("hook_score", 0.0),
+                        "energy": cand.get("energy", 0.0),
+                        "loopability": cand.get("loopability", 0.0),
                         "clip_path": str(clip_path),
                         "txt": str(txt_path),
                         "json": str(json_path),
-                        "text": (text[:240] if text else "")
+                        "text": text[:240] if text else "",
                     })
                 
-                progress_bar.empty() # Fjern baren når færdig
-                st.session_state.results = results
-                continue
-
-            # ---------------- Song: chorus-aware ----------------
-            if mode_now == "Song: Chorus-aware (30–45s → hooks/loops)":
-                st.write("🤔 Leder efter omkvæd (chorus)...")
-                chorus_windows = []
-                # SKIPPED TO AVOID ERROR:
-                # chorus_windows = find_chorus_windows(...) 
-                
-                if not chorus_windows:
-                    st.write("ℹ️ Fandt ingen tydelige omkvæd (eller funktion deaktiveret).")
-                
-                # (Resten af koden er uændret logic men i ny kontekst)
-                st.session_state.results = results
-                continue
-
-            # ---------------- Radio / jingles ----------------
-            if mode_now == "Radio/tale (split på stilhed)":
-                st.write("✂️ Analyserer stilhed i filen (dette går hurtigt)...")
+                progress_bar.empty()
+            
+            # ----------------------------
+            # Mode: Broadcast Hunter (Mix)
+            # ----------------------------
+            else:
+                st.write("📻 Analyzing silence...")
                 intervals = detect_non_silent_intervals(
                     in_path,
                     noise_db=st.session_state["noise_db"],
@@ -573,126 +474,140 @@ if run_btn:
                     pad_s=st.session_state["pad_s"],
                     min_segment_s=st.session_state["min_segment_s"],
                 )
-            else:
-                st.write("📏 Klipper filen i faste bidder...")
-                intervals = fixed_length_intervals(in_path, segment_len=st.session_state["fixed_len"])
-
-            st.write(f"✂️ Fandt {len(intervals)} klip. Genererer filer og tekst...")
-            
-            progress_bar = st.progress(0)
-            total_int = len(intervals)
-            
-            for idx, (a, b) in enumerate(intervals, start=1):
-                progress_bar.progress(idx / total_int)
                 
-                if idx % 5 == 0:
-                     st.write(f"   💾 Gemmer klip {idx}/{total_int}...")
-
-                a, b = float(a), float(b)
-                dur = max(0.0, b - a)
-                base = f"{idx:04d}_{hhmmss_ms(a)}_to_{hhmmss_ms(b)}"
-
-                wav_for_whisper = session_dir / f"{base}__whisper.wav"
-                cut_segment_to_wav(in_path, wav_for_whisper, a, b)
-
-                t = transcribe_wav(st.session_state.model, wav_for_whisper, language=lang or "da")
-                text = (t.get("text") or "").strip()
-
-                slug = ""
-                if st.session_state["use_slug"] and text:
-                    slug = safe_slug(" ".join(text.split()[: int(st.session_state["slug_words"]) ]))
-
-                stem = f"{base}__{slug}" if slug else base
-                clip_path = export_clip(in_path, session_dir, stem, a, b, st.session_state["export_format"])
-
-                txt_path = session_dir / f"{stem}.txt"
-                json_path = session_dir / f"{stem}.json"
-                txt_path.write_text(text + "\n", encoding="utf-8")
-                json_path.write_text(json.dumps(t, ensure_ascii=False, indent=2), encoding="utf-8")
-
-                tags = auto_tags(text)
-                score = float(jingle_score(text, dur))
-
-                results.append({
-                    "source": in_name,
-                    "pick": True,
-                    "group": "radio",
-                    "clip": idx,
-                    "start_sec": a,
-                    "end_sec": b,
-                    "dur_sec": dur,
-                    "tags": ", ".join(tags),
-                    "jingle_score": score,
-                    "clip_path": str(clip_path),
-                    "txt": str(txt_path),
-                    "json": str(json_path),
-                    "text": text[:240] if text else ""
-                })
-
-            progress_bar.empty()
-            st.session_state.results = results
+                # Apply 4-second filter
+                intervals = [(a, b) for a, b in intervals if (b - a) >= 4.0]
+                st.write(f"✂️ Found {len(intervals)} segments (after 4s filter)")
+                
+                progress_bar = st.progress(0)
+                total_int = len(intervals)
+                
+                for idx, (a, b) in enumerate(intervals, start=1):
+                    progress_bar.progress(idx / total_int)
+                    
+                    a, b = float(a), float(b)
+                    dur = max(0.0, b - a)
+                    base = f"{idx:04d}_{hhmmss_ms(a)}_to_{hhmmss_ms(b)}"
+                    
+                    # Transcribe
+                    wav_for_whisper = session_dir / f"{base}__whisper.wav"
+                    cut_segment_to_wav(in_path, wav_for_whisper, a, b)
+                    t = transcribe_wav(st.session_state.model, wav_for_whisper, language=lang)
+                    text = (t.get("text") or "").strip()
+                    
+                    # Generate slug
+                    slug = ""
+                    if st.session_state["use_slug"] and text:
+                        slug = safe_slug(" ".join(text.split()[:int(st.session_state["slug_words"])]))
+                    
+                    stem = f"{base}__{slug}" if slug else base
+                    
+                    # Export without tail for broadcast
+                    clip_path = export_clip_with_tail(
+                        in_path, session_dir, stem, a, b,
+                        st.session_state["export_format"],
+                        add_tail=False
+                    )
+                    
+                    # Save metadata
+                    txt_path = session_dir / f"{stem}.txt"
+                    json_path = session_dir / f"{stem}.json"
+                    txt_path.write_text(text + "\n", encoding="utf-8")
+                    json_path.write_text(
+                        json.dumps(t, ensure_ascii=False, indent=2),
+                        encoding="utf-8"
+                    )
+                    
+                    tags = auto_tags(text)
+                    score = float(jingle_score(text, dur))
+                    themes = detect_themes(text)
+                    
+                    results.append({
+                        "source": in_name,
+                        "filename": clip_path.name,
+                        "pick": True,
+                        "clip": idx,
+                        "start_sec": a,
+                        "end_sec": b,
+                        "dur_sec": dur,
+                        "bpm": 0,
+                        "tags": ", ".join(tags),
+                        "themes": ", ".join(themes),
+                        "jingle_score": score,
+                        "clip_path": str(clip_path),
+                        "txt": str(txt_path),
+                        "json": str(json_path),
+                        "text": text[:240] if text else "",
+                    })
+                
+                progress_bar.empty()
+        
+        st.session_state.results = results
         
         if not results:
-             status.update(label="⚠️ Færdig, men fandt ingen klip.", state="error", expanded=True)
-             st.error("Modellen fandt ingen klip med de nuværende indstillinger. Prøv at justere sliderne (f.eks. 'Hook-længde' eller 'Threshold').")
+            status.update(label="⚠️ No clips found", state="error")
+            st.error("No clips found with current settings. Try adjusting parameters.")
         else:
-             status.update(label=f"✅ Succes! Fandt {len(results)} klip.", state="complete", expanded=False)
-             st.balloons()
-             st.success(f"Færdig! Scroll ned for at se dine {len(results)} klip.")
-
-    # ------------------ PROGRESS BAR SECTION END ------------------
-
+            status.update(label=f"✅ Success! Found {len(results)} clips", state="complete")
+            st.balloons()
+            st.success(f"🎉 Finished! Found {len(results)} clips. Scroll down to preview.")
 
 # ----------------------------
-# Results browser / export
+# Results Browser / Export
 # ----------------------------
 if "results" in st.session_state and st.session_state.results:
     st.divider()
-    st.subheader("C) Klip-browser (vælg de gode)")
-
+    st.subheader("📊 Results Browser")
+    
     df = pd.DataFrame(st.session_state.results)
     if "pick" not in df.columns:
         df["pick"] = True
-
-    # Optional filter for jingles
-    if st.session_state["jingle_mode"] and "jingle_score" in df.columns:
-        df = df[df["jingle_score"] >= float(st.session_state["min_score"])]
-
+    
     edited = st.data_editor(
         df,
         use_container_width=True,
         hide_index=True,
         column_config={
-            "pick": st.column_config.CheckboxColumn("Gem", default=True),
-            "group": st.column_config.TextColumn("Gruppe"),
-            "refined": st.column_config.CheckboxColumn("Beat-refined"),
-            "refine_bpm": st.column_config.NumberColumn("BPM", format="%.1f"),
-            "refine_bars": st.column_config.NumberColumn("Bars", format="%d"),
-            "refine_score": st.column_config.NumberColumn("Refine score", format="%.2f"),
-            "hook_score": st.column_config.NumberColumn("Hook score", format="%.2f"),
-            "jingle_score": st.column_config.NumberColumn("Jingle score", format="%.2f"),
-            "text": st.column_config.TextColumn("Transcript (kort)", width="large"),
-            "clip_path": st.column_config.TextColumn("Fil", width="large"),
+            "pick": st.column_config.CheckboxColumn("Select", default=True),
+            "filename": st.column_config.TextColumn("Filename", width="large"),
+            "bpm": st.column_config.NumberColumn("BPM", format="%d"),
+            "tags": st.column_config.TextColumn("Tags", width="medium"),
+            "themes": st.column_config.TextColumn("Themes", width="medium"),
+            "dur_sec": st.column_config.NumberColumn("Duration", format="%.2f"),
+            "hook_score": st.column_config.NumberColumn("Hook Score", format="%.2f"),
+            "jingle_score": st.column_config.NumberColumn("Jingle Score", format="%.2f"),
+            "text": st.column_config.TextColumn("Transcript", width="large"),
         }
     )
-
+    
     selected = edited[edited["pick"] == True].copy()
-    st.write(f"**Valgt:** {len(selected)} klip")
-
-    with st.expander("Preview af valgte (første 50)"):
-        for _, r in selected.head(50).iterrows():
+    st.write(f"**Selected:** {len(selected)} clips")
+    
+    # Preview section
+    with st.expander("🎧 Preview Selected (first 10)", expanded=True):
+        for idx, r in selected.head(10).iterrows():
             p = Path(r["clip_path"])
-            st.write(f"**{p.name}** ({float(r['dur_sec']):.2f}s) | group={r.get('group','')} | tags={r.get('tags','')}")
-            if p.exists():
-                st.audio(p.read_bytes())
-            if r.get("text"):
-                st.write(r["text"])
-
-    if st.button("Eksportér ZIP (valgte)", type="primary"):
+            col1, col2 = st.columns([3, 1])
+            with col1:
+                st.write(f"**{r['filename']}**")
+                st.caption(f"Duration: {float(r['dur_sec']):.2f}s | BPM: {r.get('bpm', 0)} | Tags: {r.get('tags', '')}")
+                if r.get("text"):
+                    st.write(f"📝 {r['text']}")
+            with col2:
+                if p.exists():
+                    st.audio(p.read_bytes())
+    
+    # Export ZIP
+    if st.button("📦 Export ZIP (Selected)", type="primary", use_container_width=True):
         zip_buf = io.BytesIO()
         with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as z:
-            z.writestr("manifest_selected.csv", selected.to_csv(index=False).encode("utf-8"))
-
+            # Add manifest
+            z.writestr(
+                "manifest_selected.csv",
+                selected.to_csv(index=False).encode("utf-8")
+            )
+            
+            # Add files
             for _, r in selected.iterrows():
                 src_stem = Path(r["source"]).stem
                 for k in ["clip_path", "txt", "json"]:
@@ -700,33 +615,14 @@ if "results" in st.session_state and st.session_state.results:
                         fp = Path(r[k])
                         if fp.exists():
                             z.write(fp, arcname=f"{src_stem}/{fp.name}")
-
+        
         zip_buf.seek(0)
         st.download_button(
-            label="Download ZIP",
+            label="⬇️ Download ZIP",
             data=zip_buf,
-            file_name="radio_clips_selected.zip",
-            mime="application/zip"
+            file_name="sample_machine_clips.zip",
+            mime="application/zip",
+            use_container_width=True,
         )
 else:
-    st.info("Upload eller download en fil, load model (hvis nødvendigt), og kør Process.") 
-
-# --- DOWNLOAD SEKTION ---
-st.divider() # Laver en visuel streg
-st.subheader("📥 Download dine filer")
-
-# Find alle wav og mp3 filer i mappen
-found_files = [f for f in os.listdir('.') if f.endswith(('.wav', '.mp3'))]
-
-if not found_files:
-    st.info("Ingen filer klar til download endnu. Kør splitteren først.")
-else:
-    for filename in found_files:
-        filepath = os.path.join('.', filename)
-        with open(filepath, "rb") as f:
-            st.download_button(
-                label=f"Download {filename}",
-                data=f,
-                file_name=filename,
-                mime="audio/wav"
-            )
+    st.info("👆 Upload or download a file, load the Whisper model, and click Process to begin.")
