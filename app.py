@@ -76,6 +76,7 @@ DEFAULTS = {
     "beat_refine": True,
     "beats_per_bar": 4,
     "prefer_bars": 1,
+    "prefer_bars_ui": "1 bar",
     "try_both_bars": True,
     "use_slug": True,
     "slug_words": 6,
