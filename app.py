@@ -248,8 +248,8 @@ if st.session_state["mode"] == "📻 Broadcast Hunter (Mix)":
     st.sidebar.slider("Min segment (sec)", 0.5, 10.0, step=0.1, key="min_segment_s")
 else:
     st.sidebar.subheader("🎵 Hook Detection")
-    st.sidebar.slider("Min hook length (sec)", 2.0, 30.0, step=0.5, key="hook_len_range_min", value=4.0)
-    st.sidebar.slider("Max hook length (sec)", 2.0, 30.0, step=0.5, key="hook_len_range_max", value=15.0)
+    st.sidebar.slider("Min hook length (sec)", 2.0, 30.0, step=0.5, key="hook_len_range_min")
+    st.sidebar.slider("Max hook length (sec)", 2.0, 30.0, step=0.5, key="hook_len_range_max")
     
     # Validate that min <= max
     if st.session_state["hook_len_range_min"] > st.session_state["hook_len_range_max"]:
@@ -259,6 +259,19 @@ else:
     st.sidebar.slider("Scan hop (sec)", 0.25, 5.0, step=0.25, key="hook_hop")
     st.sidebar.slider("Top N hooks", 3, 30, step=1, key="hook_topn")
     st.sidebar.slider("Min gap between hooks (sec)", 0.0, 10.0, step=0.5, key="hook_gap")
+    
+    st.sidebar.subheader("🎼 Chorus Detection")
+    st.sidebar.slider("Min chorus length (sec)", 10.0, 60.0, step=1.0, key="chorus_len_range_min")
+    st.sidebar.slider("Max chorus length (sec)", 15.0, 90.0, step=1.0, key="chorus_len_range_max")
+    
+    # Validate that chorus min <= max
+    if st.session_state["chorus_len_range_min"] > st.session_state["chorus_len_range_max"]:
+        st.sidebar.error("⚠️ Min chorus length cannot exceed max chorus length")
+    
+    st.sidebar.slider("Chorus scan hop (sec)", 0.5, 10.0, step=0.5, key="chorus_hop")
+    st.sidebar.slider("Top N choruses", 1, 10, step=1, key="chorus_topn")
+    st.sidebar.slider("Min chorus gap (sec)", 2.0, 20.0, step=1.0, key="chorus_gap")
+    st.sidebar.slider("Loops per chorus", 1, 20, step=1, key="loops_per_chorus")
     
     st.sidebar.subheader("🎼 Beat Refinement")
     st.sidebar.checkbox("Refine to beat grid", key="beat_refine")
@@ -366,18 +379,36 @@ if run_btn:
             # Mode: Song Hunter (Loops)
             # ----------------------------
             if mode_now == "🎵 Song Hunter (Loops)":
-                st.write("🎵 Finding hooks...")
-                hooks = find_hooks(
+                # Try Chorus detection first, fallback to Hooks
+                st.write("🎼 Trying chorus detection...")
+                chorus_hooks = find_hooks(
                     wav16,
                     hook_len_range=(
-                        st.session_state["hook_len_range_min"],
-                        st.session_state["hook_len_range_max"]
+                        st.session_state["chorus_len_range_min"],
+                        st.session_state["chorus_len_range_max"]
                     ),
-                    prefer_len=st.session_state["prefer_len"],
-                    hop_s=st.session_state["hook_hop"],
-                    topn=st.session_state["hook_topn"],
-                    min_gap_s=st.session_state["hook_gap"],
+                    prefer_len=(st.session_state["chorus_len_range_min"] + st.session_state["chorus_len_range_max"]) / 2.0,
+                    hop_s=st.session_state["chorus_hop"],
+                    topn=st.session_state["chorus_topn"],
+                    min_gap_s=st.session_state["chorus_gap"],
                 )
+                
+                if chorus_hooks:
+                    st.write(f"🎼 Found {len(chorus_hooks)} chorus sections!")
+                    hooks = chorus_hooks
+                else:
+                    st.write("⚠️ Chorus detection failed, falling back to Hooks logic...")
+                    hooks = find_hooks(
+                        wav16,
+                        hook_len_range=(
+                            st.session_state["hook_len_range_min"],
+                            st.session_state["hook_len_range_max"]
+                        ),
+                        prefer_len=st.session_state["prefer_len"],
+                        hop_s=st.session_state["hook_hop"],
+                        topn=st.session_state["hook_topn"],
+                        min_gap_s=st.session_state["hook_gap"],
+                    )
                 st.write(f"🎉 Found {len(hooks)} potential hooks!")
                 
                 # Convert to candidate format
@@ -415,6 +446,20 @@ if run_btn:
                     aa, bb = (a2, b2) if refined_ok else (a, b)
                     dur = max(0.0, bb - aa)
                     
+                    # If refined segment < 4s, fall back to original hook window
+                    if refined_ok and dur < MIN_DURATION_SECONDS:
+                        aa, bb = a, b
+                        dur = max(0.0, bb - aa)
+                        refined_ok = False
+                    
+                    # Final 4-second minimum check
+                    if dur < MIN_DURATION_SECONDS:
+                        continue
+                    
+                    # BPM: prefer refined BPM, fall back to hook finder BPM
+                    clip_bpm = int(round(float(bpm))) if int(round(float(bpm))) > 0 else int(round(float(cand.get("bpm", 0))))
+                    clip_bars = int(bars) if refined_ok else 0
+                    
                     # Transcribe
                     base = f"{idx:04d}_{hhmmss_ms(aa)}_to_{hhmmss_ms(bb)}"
                     wav_for_whisper = session_dir / f"{base}__whisper.wav"
@@ -427,7 +472,10 @@ if run_btn:
                     if st.session_state["use_slug"] and text:
                         slug = safe_slug(" ".join(text.split()[:int(st.session_state["slug_words"])]))
                     
-                    stem = f"{base}__{slug}" if slug else base
+                    # Build filename with BPM and bar info
+                    bpm_tag = f"_bpm{clip_bpm}" if clip_bpm > 0 else ""
+                    bar_tag = f"_{clip_bars}bar" if refined_ok and clip_bars > 0 else ""
+                    stem = f"{base}{bpm_tag}{bar_tag}__{slug}" if slug else f"{base}{bpm_tag}{bar_tag}"
                     
                     # Export with tail
                     clip_path = export_clip_with_tail(
@@ -447,7 +495,7 @@ if run_btn:
                     
                     # Tags and themes
                     tags = ["musik", "hook"]
-                    tags += [f"{bars}bar"] if refined_ok else ["unrefined"]
+                    tags += [f"{clip_bars}bar"] if refined_ok else ["unrefined"]
                     if text:
                         tags = list(set(tags + auto_tags(text)))
                     themes = detect_themes(text)
@@ -460,8 +508,8 @@ if run_btn:
                         "start_sec": aa,
                         "end_sec": bb,
                         "dur_sec": dur,
-                        "bpm": int(bpm) if refined_ok else int(cand.get("bpm", 0)),
-                        "bars": int(bars) if refined_ok else 0,
+                        "bpm": clip_bpm,
+                        "bars": clip_bars,
                         "refined": bool(refined_ok),
                         "tags": ", ".join(sorted(tags)),
                         "themes": ", ".join(themes),
@@ -609,10 +657,10 @@ if "results" in st.session_state and st.session_state.results:
                     st.write(f"📝 {r['text']}")
             with col2:
                 if p.exists():
-                    st.audio(p.read_bytes())
+                    st.audio(p.read_bytes(), key=f"audio_{idx}_{r['filename']}")
     
     # Export ZIP
-    if st.button("📦 Export ZIP (Selected)", type="primary", use_container_width=True):
+    if st.button("📦 Export ZIP (Selected)", type="primary", use_container_width=True, key="export_zip_btn"):
         zip_buf = io.BytesIO()
         with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as z:
             # Add manifest
@@ -637,6 +685,7 @@ if "results" in st.session_state and st.session_state.results:
             file_name="sample_machine_clips.zip",
             mime="application/zip",
             use_container_width=True,
+            key="dl_zip_selected",
         )
 else:
     st.info("👆 Upload or download a file, load the Whisper model, and click Process to begin.")

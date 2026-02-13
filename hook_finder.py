@@ -47,7 +47,7 @@ def find_hooks(
     duration = librosa.get_duration(y=y, sr=sr)
 
     min_len, max_len = hook_len_range
-    win_len = prefer_len
+    win_len = max(min_len, min(prefer_len, max_len))
     hop = hop_s
 
     windows = []
