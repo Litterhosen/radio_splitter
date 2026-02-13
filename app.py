@@ -248,8 +248,8 @@ if st.session_state["mode"] == "📻 Broadcast Hunter (Mix)":
     st.sidebar.slider("Min segment (sec)", 0.5, 10.0, step=0.1, key="min_segment_s")
 else:
     st.sidebar.subheader("🎵 Hook Detection")
-    st.sidebar.slider("Min hook length (sec)", 2.0, 30.0, step=0.5, key="hook_len_range_min", value=4.0)
-    st.sidebar.slider("Max hook length (sec)", 2.0, 30.0, step=0.5, key="hook_len_range_max", value=15.0)
+    st.sidebar.slider("Min hook length (sec)", 2.0, 30.0, step=0.5, key="hook_len_range_min")
+    st.sidebar.slider("Max hook length (sec)", 2.0, 30.0, step=0.5, key="hook_len_range_max")
     
     # Validate that min <= max
     if st.session_state["hook_len_range_min"] > st.session_state["hook_len_range_max"]:
