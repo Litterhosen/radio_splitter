@@ -3,6 +3,9 @@ from typing import Optional, Dict, Any
 
 from faster_whisper import WhisperModel
 
+# Supported languages for explicit transcription
+SUPPORTED_LANGUAGES = ("da", "en")
+
 
 @dataclass
 class WhisperState:
@@ -16,15 +19,19 @@ def load_model(model_size: str = "small", device: str = "cpu", compute_type: str
     return WhisperModel(model_size, device=device, compute_type=compute_type)
 
 
-def transcribe_wav(model: WhisperModel, wav_path, language: Optional[str] = "da") -> Dict[str, Any]:
+def transcribe_wav(model: WhisperModel, wav_path, language: Optional[str] = None) -> Dict[str, Any]:
     """
     Returns dict with:
       - text
       - segments: [{start, end, text}, ...]
+    
+    Args:
+        language: None for auto-detect, "da" for Danish, "en" for English
     """
+    lang_arg = language if language in SUPPORTED_LANGUAGES else None
     segments, info = model.transcribe(
         str(wav_path),
-        language=language if language in ("da", "en") else None,
+        language=lang_arg,
         vad_filter=False,
         beam_size=5,
     )

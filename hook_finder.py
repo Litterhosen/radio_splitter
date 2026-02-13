@@ -29,7 +29,10 @@ def ffmpeg_to_wav16k_mono(in_path, out_path):
 
 def estimate_bpm(y, sr):
     tempo, _ = librosa.beat.beat_track(y=y, sr=sr)
-    return float(tempo)
+    # Handle numpy array return from newer librosa
+    if hasattr(tempo, '__len__'):
+        tempo = tempo[0] if len(tempo) > 0 else 120.0
+    return int(round(float(tempo)))
 
 
 def find_hooks(
