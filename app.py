@@ -456,8 +456,8 @@ if run_btn:
                     if dur < MIN_DURATION_SECONDS:
                         continue
                     
-                    # BPM: use refined BPM if available, else from hook finder
-                    clip_bpm = int(round(float(bpm))) if bpm else int(round(float(cand.get("bpm", 0))))
+                    # BPM: prefer refined BPM, fall back to hook finder BPM
+                    clip_bpm = int(round(float(bpm))) if int(round(float(bpm))) > 0 else int(round(float(cand.get("bpm", 0))))
                     clip_bars = int(bars) if refined_ok else 0
                     
                     # Transcribe
