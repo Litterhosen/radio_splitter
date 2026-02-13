@@ -248,8 +248,8 @@ if st.session_state["mode"] == "📻 Broadcast Hunter (Mix)":
     st.sidebar.slider("Min segment (sec)", 0.5, 10.0, step=0.1, key="min_segment_s")
 else:
     st.sidebar.subheader("🎵 Hook Detection")
-    st.sidebar.slider("Min hook length (sec)", 2.0, 30.0, step=0.5, key="hook_len_range_min", value=4.0)
-    st.sidebar.slider("Max hook length (sec)", 2.0, 30.0, step=0.5, key="hook_len_range_max", value=15.0)
+    st.sidebar.slider("Min hook length (sec)", 2.0, 30.0, step=0.5, key="hook_len_range_min")
+    st.sidebar.slider("Max hook length (sec)", 2.0, 30.0, step=0.5, key="hook_len_range_max")
     
     # Validate that min <= max
     if st.session_state["hook_len_range_min"] > st.session_state["hook_len_range_max"]:
@@ -446,9 +446,19 @@ if run_btn:
                     aa, bb = (a2, b2) if refined_ok else (a, b)
                     dur = max(0.0, bb - aa)
                     
-                    # Re-check 4-second minimum after beat refinement
+                    # If refined segment < 4s, fall back to original hook window
+                    if refined_ok and dur < MIN_DURATION_SECONDS:
+                        aa, bb = a, b
+                        dur = max(0.0, bb - aa)
+                        refined_ok = False
+                    
+                    # Final 4-second minimum check
                     if dur < MIN_DURATION_SECONDS:
                         continue
+                    
+                    # BPM: use refined BPM if available, else from hook finder
+                    clip_bpm = int(round(float(bpm))) if bpm else int(round(float(cand.get("bpm", 0))))
+                    clip_bars = int(bars) if refined_ok else 0
                     
                     # Transcribe
                     base = f"{idx:04d}_{hhmmss_ms(aa)}_to_{hhmmss_ms(bb)}"
@@ -462,7 +472,10 @@ if run_btn:
                     if st.session_state["use_slug"] and text:
                         slug = safe_slug(" ".join(text.split()[:int(st.session_state["slug_words"])]))
                     
-                    stem = f"{base}__{slug}" if slug else base
+                    # Build filename with BPM and bar info
+                    bpm_tag = f"_bpm{clip_bpm}" if clip_bpm > 0 else ""
+                    bar_tag = f"_{clip_bars}bar" if refined_ok and clip_bars > 0 else ""
+                    stem = f"{base}{bpm_tag}{bar_tag}__{slug}" if slug else f"{base}{bpm_tag}{bar_tag}"
                     
                     # Export with tail
                     clip_path = export_clip_with_tail(
@@ -482,7 +495,7 @@ if run_btn:
                     
                     # Tags and themes
                     tags = ["musik", "hook"]
-                    tags += [f"{bars}bar"] if refined_ok else ["unrefined"]
+                    tags += [f"{clip_bars}bar"] if refined_ok else ["unrefined"]
                     if text:
                         tags = list(set(tags + auto_tags(text)))
                     themes = detect_themes(text)
@@ -495,8 +508,8 @@ if run_btn:
                         "start_sec": aa,
                         "end_sec": bb,
                         "dur_sec": dur,
-                        "bpm": int(round(float(bpm))) if refined_ok else int(round(float(cand.get("bpm", 0)))),
-                        "bars": int(bars) if refined_ok else 0,
+                        "bpm": clip_bpm,
+                        "bars": clip_bars,
                         "refined": bool(refined_ok),
                         "tags": ", ".join(sorted(tags)),
                         "themes": ", ".join(themes),
