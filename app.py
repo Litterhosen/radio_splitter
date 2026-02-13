@@ -260,6 +260,14 @@ else:
     st.sidebar.slider("Top N hooks", 3, 30, step=1, key="hook_topn")
     st.sidebar.slider("Min gap between hooks (sec)", 0.0, 10.0, step=0.5, key="hook_gap")
     
+    st.sidebar.subheader("🎼 Chorus Detection")
+    st.sidebar.slider("Min chorus length (sec)", 10.0, 60.0, step=1.0, key="chorus_len_range_min")
+    st.sidebar.slider("Max chorus length (sec)", 15.0, 90.0, step=1.0, key="chorus_len_range_max")
+    st.sidebar.slider("Chorus scan hop (sec)", 0.5, 10.0, step=0.5, key="chorus_hop")
+    st.sidebar.slider("Top N choruses", 1, 10, step=1, key="chorus_topn")
+    st.sidebar.slider("Min chorus gap (sec)", 2.0, 20.0, step=1.0, key="chorus_gap")
+    st.sidebar.slider("Loops per chorus", 1, 20, step=1, key="loops_per_chorus")
+    
     st.sidebar.subheader("🎼 Beat Refinement")
     st.sidebar.checkbox("Refine to beat grid", key="beat_refine")
     st.sidebar.number_input("Beats per bar", min_value=3, max_value=7, step=1, key="beats_per_bar")
@@ -366,18 +374,36 @@ if run_btn:
             # Mode: Song Hunter (Loops)
             # ----------------------------
             if mode_now == "🎵 Song Hunter (Loops)":
-                st.write("🎵 Finding hooks...")
-                hooks = find_hooks(
+                # Try Chorus detection first, fallback to Hooks
+                st.write("🎼 Trying chorus detection...")
+                chorus_hooks = find_hooks(
                     wav16,
                     hook_len_range=(
-                        st.session_state["hook_len_range_min"],
-                        st.session_state["hook_len_range_max"]
+                        st.session_state["chorus_len_range_min"],
+                        st.session_state["chorus_len_range_max"]
                     ),
-                    prefer_len=st.session_state["prefer_len"],
-                    hop_s=st.session_state["hook_hop"],
-                    topn=st.session_state["hook_topn"],
-                    min_gap_s=st.session_state["hook_gap"],
+                    prefer_len=st.session_state["chorus_len_range_min"],
+                    hop_s=st.session_state["chorus_hop"],
+                    topn=st.session_state["chorus_topn"],
+                    min_gap_s=st.session_state["chorus_gap"],
                 )
+                
+                if chorus_hooks:
+                    st.write(f"🎼 Found {len(chorus_hooks)} chorus sections!")
+                    hooks = chorus_hooks
+                else:
+                    st.write("⚠️ Chorus detection failed, falling back to Hooks logic...")
+                    hooks = find_hooks(
+                        wav16,
+                        hook_len_range=(
+                            st.session_state["hook_len_range_min"],
+                            st.session_state["hook_len_range_max"]
+                        ),
+                        prefer_len=st.session_state["prefer_len"],
+                        hop_s=st.session_state["hook_hop"],
+                        topn=st.session_state["hook_topn"],
+                        min_gap_s=st.session_state["hook_gap"],
+                    )
                 st.write(f"🎉 Found {len(hooks)} potential hooks!")
                 
                 # Convert to candidate format
@@ -414,6 +440,10 @@ if run_btn:
                     a2, b2, bpm, bars, rscore, refined_ok, rreason = maybe_refine_barloop(wav16, a, b)
                     aa, bb = (a2, b2) if refined_ok else (a, b)
                     dur = max(0.0, bb - aa)
+                    
+                    # Re-check 4-second minimum after beat refinement
+                    if dur < MIN_DURATION_SECONDS:
+                        continue
                     
                     # Transcribe
                     base = f"{idx:04d}_{hhmmss_ms(aa)}_to_{hhmmss_ms(bb)}"
@@ -460,7 +490,7 @@ if run_btn:
                         "start_sec": aa,
                         "end_sec": bb,
                         "dur_sec": dur,
-                        "bpm": int(bpm) if refined_ok else int(cand.get("bpm", 0)),
+                        "bpm": int(round(float(bpm))) if refined_ok else int(round(float(cand.get("bpm", 0)))),
                         "bars": int(bars) if refined_ok else 0,
                         "refined": bool(refined_ok),
                         "tags": ", ".join(sorted(tags)),
@@ -609,10 +639,10 @@ if "results" in st.session_state and st.session_state.results:
                     st.write(f"📝 {r['text']}")
             with col2:
                 if p.exists():
-                    st.audio(p.read_bytes())
+                    st.audio(p.read_bytes(), key=f"audio_{idx}_{r['filename']}")
     
     # Export ZIP
-    if st.button("📦 Export ZIP (Selected)", type="primary", use_container_width=True):
+    if st.button("📦 Export ZIP (Selected)", type="primary", use_container_width=True, key="export_zip_btn"):
         zip_buf = io.BytesIO()
         with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as z:
             # Add manifest
@@ -637,6 +667,7 @@ if "results" in st.session_state and st.session_state.results:
             file_name="sample_machine_clips.zip",
             mime="application/zip",
             use_container_width=True,
+            key="dl_zip_selected",
         )
 else:
     st.info("👆 Upload or download a file, load the Whisper model, and click Process to begin.")

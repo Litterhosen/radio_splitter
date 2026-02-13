@@ -91,7 +91,7 @@ class CmdResult:
 
 
 def run_cmd(cmd: List[str], check: bool = True) -> CmdResult:
-    p = subprocess.run(cmd, capture_output=True, text=True)
+    p = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
     res = CmdResult(cmd=cmd, rc=p.returncode, out=p.stdout or "", err=p.stderr or "")
     if check and res.rc != 0:
         raise RuntimeError(f"Command failed ({res.rc}): {' '.join(cmd)}\n{res.err}")
