@@ -263,6 +263,11 @@ else:
     st.sidebar.subheader("🎼 Chorus Detection")
     st.sidebar.slider("Min chorus length (sec)", 10.0, 60.0, step=1.0, key="chorus_len_range_min")
     st.sidebar.slider("Max chorus length (sec)", 15.0, 90.0, step=1.0, key="chorus_len_range_max")
+    
+    # Validate that chorus min <= max
+    if st.session_state["chorus_len_range_min"] > st.session_state["chorus_len_range_max"]:
+        st.sidebar.error("⚠️ Min chorus length cannot exceed max chorus length")
+    
     st.sidebar.slider("Chorus scan hop (sec)", 0.5, 10.0, step=0.5, key="chorus_hop")
     st.sidebar.slider("Top N choruses", 1, 10, step=1, key="chorus_topn")
     st.sidebar.slider("Min chorus gap (sec)", 2.0, 20.0, step=1.0, key="chorus_gap")
@@ -382,7 +387,7 @@ if run_btn:
                         st.session_state["chorus_len_range_min"],
                         st.session_state["chorus_len_range_max"]
                     ),
-                    prefer_len=st.session_state["chorus_len_range_min"],
+                    prefer_len=(st.session_state["chorus_len_range_min"] + st.session_state["chorus_len_range_max"]) / 2.0,
                     hop_s=st.session_state["chorus_hop"],
                     topn=st.session_state["chorus_topn"],
                     min_gap_s=st.session_state["chorus_gap"],
