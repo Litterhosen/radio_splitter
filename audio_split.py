@@ -150,3 +150,23 @@ def cut_segment_to_mp3(src_path: Path, out_path: Path, start_s: float, end_s: fl
         "-b:a", bitrate,
         str(out_path)
     ])
+
+
+def mean_volume_db(audio_path: Path) -> float:
+    ffmpeg = find_ffmpeg()
+    r = run_cmd([
+        ffmpeg, "-hide_banner", "-nostats",
+        "-i", str(audio_path),
+        "-af", "volumedetect",
+        "-f", "null", "-"
+    ], check=False)
+
+    for line in (r.err or "").splitlines():
+        if "mean_volume:" in line:
+            try:
+                val = line.split("mean_volume:", 1)[1].strip().split(" ", 1)[0]
+                return float(val)
+            except Exception:
+                break
+
+    return -99.0

@@ -48,9 +48,11 @@ def find_ffmpeg() -> str:
     4) imageio-ffmpeg bundled binary
     """
     try:
-        sp = st.secrets.get("FFMPEG_PATH", "")
-        if sp:
-            return str(sp)
+        secrets_path = Path(".streamlit") / "secrets.toml"
+        if secrets_path.exists():
+            sp = st.secrets.get("FFMPEG_PATH", "")
+            if sp:
+                return str(sp)
     except Exception:
         pass
 

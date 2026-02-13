@@ -83,3 +83,90 @@ def find_hooks(
             selected.append(w)
 
     return selected
+
+
+def _window_features(y, sr, start, end):
+    s = int(start * sr)
+    e = int(end * sr)
+    seg = y[s:e]
+    if len(seg) < sr:
+        return None
+    energy = float(np.mean(np.abs(seg)))
+    stability = float(np.std(seg))
+    loopability = 1.0 / (1.0 + stability)
+    bpm = estimate_bpm(seg, sr)
+    return seg, energy, loopability, stability, bpm
+
+
+def find_chorus_candidates(
+    wav_path,
+    window_len=8.0,
+    hop_s=1.0,
+    topn=6,
+    min_gap_s=2.0,
+    sim_threshold=0.85,
+):
+    y, sr = librosa.load(wav_path, sr=22050)
+    duration = librosa.get_duration(y=y, sr=sr)
+
+    win_len = max(2.0, float(window_len))
+    hop = max(0.25, float(hop_s))
+
+    windows = []
+    t = 0.0
+    while t + win_len < duration:
+        feats = _window_features(y, sr, t, t + win_len)
+        if feats is None:
+            break
+        seg, energy, loopability, stability, bpm = feats
+        chroma = librosa.feature.chroma_stft(y=seg, sr=sr)
+        vec = np.mean(chroma, axis=1)
+        norm = np.linalg.norm(vec) or 1.0
+        vec = vec / norm
+
+        windows.append({
+            "start": t,
+            "end": t + win_len,
+            "vec": vec,
+            "energy": energy,
+            "loopability": loopability,
+            "stability": stability,
+            "bpm": bpm,
+        })
+        t += hop
+
+    if len(windows) < 2:
+        return []
+
+    # Chorus-aware score: max similarity to any other window
+    for i, w in enumerate(windows):
+        max_sim = 0.0
+        for j, o in enumerate(windows):
+            if i == j:
+                continue
+            sim = float(np.dot(w["vec"], o["vec"]))
+            if sim > max_sim:
+                max_sim = sim
+        w["chorus_sim"] = max_sim
+
+    ranked = [w for w in windows if w["chorus_sim"] >= sim_threshold]
+    ranked.sort(key=lambda w: w["chorus_sim"], reverse=True)
+
+    selected = []
+    for w in ranked:
+        if len(selected) >= topn:
+            break
+        if all(abs(w["start"] - s.start) > min_gap_s for s in selected):
+            selected.append(
+                HookWindow(
+                    w["start"],
+                    w["end"],
+                    float(w["chorus_sim"]),
+                    w["energy"],
+                    w["loopability"],
+                    w["stability"],
+                    w["bpm"],
+                )
+            )
+
+    return selected

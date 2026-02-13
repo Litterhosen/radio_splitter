@@ -28,4 +28,16 @@ def auto_tags(text: str) -> List[str]:
     if any(w in t for w in ["rum", "ufo", "alien", "magisk", "mærkelig", "absurd", "robot", "spøgelse", "space"]):
         tags.append("weird")
 
+    themes = {
+        "TIME": ["tid", "altid", "aldrig", "nu", "øjeblik", "sekunder", "time", "ur", "evighed"],
+        "MEMORY": ["huske", "glemme", "minde", "barndom", "dengang", "remember", "tilbage"],
+        "DREAM": ["drøm", "sove", "vågne", "natten", "mørke", "dream", "night"],
+        "EXISTENTIAL": ["livet", "døden", "verden", "cirkel", "sjæl", "hjerte"],
+        "META": ["radio", "musik", "stemme", "voice", "lyd", "sound", "lytter"],
+    }
+
+    for theme, words in themes.items():
+        if any(w in t for w in words):
+            tags.append(f"THEME:{theme}")
+
     return sorted(set(tags)) if tags else ["dialog"]
