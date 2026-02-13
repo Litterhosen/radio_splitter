@@ -32,7 +32,7 @@ def load_model(model_size: str = "small", device: str = "cpu", compute_type: str
         WhisperModel instance
     """
     # Try to get HF_TOKEN from environment or Streamlit secrets
-    hf_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_TOKEN")
+    hf_token = os.getenv("HF_TOKEN") or os.getenv("HUGGINGFACE_TOKEN")
     
     # If not in environment, try Streamlit secrets (if available)
     if not hf_token:
@@ -45,7 +45,8 @@ def load_model(model_size: str = "small", device: str = "cpu", compute_type: str
             pass
     
     # Set the token in environment if found (faster-whisper will use it)
-    if hf_token:
+    # Only set if token is non-empty string
+    if hf_token and hf_token.strip():
         os.environ["HF_TOKEN"] = hf_token
     
     return WhisperModel(model_size, device=device, compute_type=compute_type)
