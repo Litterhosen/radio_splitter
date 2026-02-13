@@ -76,3 +76,25 @@ source .venv/bin/activate
 pip install --upgrade pip
 pip install -r requirements.txt
 streamlit run app.py
+```
+
+### 🔑 HuggingFace Token (Valgfri/Optional)
+
+For at undgå rate limits og få hurtigere downloads af Whisper-modeller, kan du sætte en HuggingFace token:
+
+**Lokalt:**
+```bash
+# Få din token på: https://huggingface.co/settings/tokens
+export HF_TOKEN="hf_your_token_here"
+streamlit run app.py
+```
+
+**Streamlit Cloud:**
+1. Gå til din app på Streamlit Cloud
+2. Klik på "⚙️ Settings" → "Secrets"
+3. Tilføj:
+```toml
+HF_TOKEN = "hf_your_token_here"
+```
+
+**Alternativt:** Kopier `.streamlit/secrets.toml.example` til `.streamlit/secrets.toml` og udfyld din token.

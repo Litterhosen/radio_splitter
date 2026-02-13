@@ -47,6 +47,16 @@
 - [ ] Choose app URL (e.g., `radio-splitter`)
 - [ ] Click "Deploy!"
 
+### Step 3.5: Configure Secrets (Optional but Recommended) 🔑
+- [ ] After deployment, go to App Settings → Secrets
+- [ ] Click "Edit secrets"
+- [ ] Add HuggingFace token to avoid rate limits:
+```toml
+HF_TOKEN = "hf_your_token_here"
+```
+- [ ] Click "Save" (app will restart automatically)
+- [ ] See `HF_TOKEN_SETUP.md` for detailed instructions
+
 ### Step 4: Monitor Deployment 📊
 - [ ] Watch deployment logs
 - [ ] Wait 2-5 minutes for completion
