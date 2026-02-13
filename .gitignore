@@ -8,3 +8,4 @@ output/
 *.wav
 *.mp3
 app_old.py
+.streamlit/secrets.toml
