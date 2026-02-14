@@ -10,15 +10,18 @@ def download_audio(url, out_dir):
         "outtmpl": str(out_dir / "%(title)s.%(ext)s"),
         "noplaylist": True,
         "quiet": True,
-        "extractor_args": {
-            "youtube": {
-                "player_client": ["android", "web"]
-            }
-        }
+        "postprocessors": [{
+            "key": "FFmpegExtractAudio",
+            "preferredcodec": "mp3",
+            "preferredquality": "192",
+        }],
     }
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=True)
         filename = ydl.prepare_filename(info)
-
-    return Path(filename)
+        # After FFmpegExtractAudio, extension might change to .mp3
+        p = Path(filename)
+        if not p.exists() and p.with_suffix(".mp3").exists():
+            return p.with_suffix(".mp3")
+        return p
