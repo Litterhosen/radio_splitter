@@ -1,6 +1,10 @@
 # CRITICAL: st.set_page_config MUST be the VERY FIRST Streamlit call
 import streamlit as st
-st.set_page_config(page_title="The Sample Machine", layout="wide")
+
+# Version number
+VERSION = "1.0.0"
+
+st.set_page_config(page_title=f"The Sample Machine v{VERSION}", layout="wide")
 
 import io
 import json
@@ -221,7 +225,7 @@ def maybe_refine_barloop(wav_for_analysis: Path, a: float, b: float):
 # ----------------------------
 # UI - Title and Description
 # ----------------------------
-st.title("🎛️ The Sample Machine")
+st.title(f"🎛️ The Sample Machine v{VERSION}")
 st.caption("Bilingual audio splitter with whisper transcription, hook detection, and theme tagging")
 
 # ----------------------------

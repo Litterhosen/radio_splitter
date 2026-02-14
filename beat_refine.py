@@ -41,11 +41,11 @@ def refine_best_1_or_2_bars(
     bars = prefer_bars
     beats_needed = beats_per_bar * bars
 
-    if len(beats) < beats_needed:
+    if len(beats) <= beats_needed:
         return RefineResult(False, 0, 0, bpm, 0, 0, "not enough beats for bars")
 
     start_frame = beats[0]
-    end_frame = beats[beats_needed - 1]
+    end_frame = beats[beats_needed]
 
     start = librosa.frames_to_time(start_frame, sr=sr)
     end = librosa.frames_to_time(end_frame, sr=sr)
