@@ -1,20 +1,7 @@
 import numpy as np
 import librosa
 from dataclasses import dataclass
-
-
-def estimate_bars_from_duration(dur_sec: float, bpm: float, beats_per_bar: int = 4) -> int:
-    """
-    Estimate number of bars from duration, BPM, and beats per bar.
-    Returns at least 1 bar if duration > 0.
-    """
-    if dur_sec <= 0 or bpm <= 0:
-        return 1
-    
-    beats_per_second = bpm / 60.0
-    total_beats = dur_sec * beats_per_second
-    bars = max(1, int(round(total_beats / beats_per_bar)))
-    return bars
+from utils import estimate_bars_from_duration
 
 
 @dataclass

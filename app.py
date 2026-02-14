@@ -536,7 +536,7 @@ if run_btn:
                     
                     # Tags and themes
                     tags = ["musik", "hook"]
-                    if final_bars:
+                    if final_bars is not None:
                         tags.append(f"{final_bars}bar")
                     if not refined_ok:
                         tags.append("unrefined")

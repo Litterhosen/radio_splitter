@@ -16,28 +16,30 @@ class YTDLPLogger:
     def __init__(self, log_path):
         self.log_path = Path(log_path)
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
-        self.lines = []
+        # Open file in append mode for efficient logging
+        self.log_file = open(self.log_path, 'w', encoding='utf-8')
     
     def debug(self, msg):
-        self.lines.append(f"[DEBUG] {msg}")
-        self._write()
+        self._write_line(f"[DEBUG] {msg}")
     
     def info(self, msg):
-        self.lines.append(f"[INFO] {msg}")
-        self._write()
+        self._write_line(f"[INFO] {msg}")
     
     def warning(self, msg):
-        self.lines.append(f"[WARNING] {msg}")
-        self._write()
+        self._write_line(f"[WARNING] {msg}")
     
     def error(self, msg):
-        self.lines.append(f"[ERROR] {msg}")
-        self._write()
+        self._write_line(f"[ERROR] {msg}")
     
-    def _write(self):
-        """Write all lines to log file."""
-        with open(self.log_path, 'w', encoding='utf-8') as f:
-            f.write('\n'.join(self.lines))
+    def _write_line(self, line):
+        """Write a single line to the log file and flush."""
+        self.log_file.write(line + '\n')
+        self.log_file.flush()
+    
+    def close(self):
+        """Close the log file."""
+        if hasattr(self, 'log_file') and self.log_file:
+            self.log_file.close()
 
 
 def download_audio(url, out_dir):
@@ -101,11 +103,13 @@ def download_audio(url, out_dir):
                     candidate = p.with_suffix(ext)
                     if candidate.exists():
                         logger.info(f"Download successful: {candidate.name}")
+                        logger.close()
                         return candidate
                 
                 # If original file exists
                 if p.exists():
                     logger.info(f"Download successful: {p.name}")
+                    logger.close()
                     return p
                 
                 raise FileNotFoundError(f"Downloaded file not found: {filename}")
@@ -118,4 +122,5 @@ def download_audio(url, out_dir):
     # All strategies failed
     error_msg = f"Download failed after trying all format strategies. Last error: {last_error}"
     logger.error(error_msg)
+    logger.close()
     raise DownloadError(error_msg, log_file=str(log_file))
