@@ -5,16 +5,28 @@ import shutil
 import subprocess
 from datetime import datetime
 from typing import Tuple, Optional, Dict
+from enum import Enum
+
+
+class ErrorClassification(Enum):
+    """Error classification for YouTube download failures."""
+    ERR_JS_RUNTIME_MISSING = "ERR_JS_RUNTIME_MISSING"
+    ERR_VIDEO_UNAVAILABLE = "ERR_VIDEO_UNAVAILABLE"
+    ERR_GEO_BLOCK = "ERR_GEO_BLOCK"
+    ERR_LOGIN_REQUIRED = "ERR_LOGIN_REQUIRED"
+    ERR_NETWORK = "ERR_NETWORK"
+    ERR_UNKNOWN = "ERR_UNKNOWN"
 
 
 class DownloadError(Exception):
     """Custom exception for download failures."""
-    def __init__(self, message, log_file=None, last_error=None, url=None, hint=None):
+    def __init__(self, message, log_file=None, last_error=None, url=None, hint=None, error_code=None):
         super().__init__(message)
         self.log_file = log_file
         self.last_error = last_error
         self.url = url
         self.hint = hint
+        self.error_code = error_code  # ErrorClassification enum value
 
 
 class YTDLPLogger:
@@ -59,6 +71,75 @@ def check_js_runtime() -> Optional[str]:
     if node_path:
         return node_path
     return None
+
+
+def classify_error(error_text: str, has_js_runtime: bool) -> Tuple[ErrorClassification, str, str]:
+    """
+    Classify download error and provide helpful guidance.
+    
+    Args:
+        error_text: The error message text
+        has_js_runtime: Whether JS runtime is available
+    
+    Returns:
+        Tuple of (ErrorClassification, hint, next_steps)
+    """
+    error_lower = error_text.lower()
+    
+    # Check for specific error patterns
+    if not has_js_runtime and ("player" in error_lower or "signature" in error_lower):
+        return (
+            ErrorClassification.ERR_JS_RUNTIME_MISSING,
+            "JavaScript runtime (Node.js) is required for this video",
+            "1. Install Node.js from https://nodejs.org/\n"
+            "2. Restart the application\n"
+            "3. Try the download again"
+        )
+    
+    if "video unavailable" in error_lower or "removed" in error_lower or "deleted" in error_lower:
+        return (
+            ErrorClassification.ERR_VIDEO_UNAVAILABLE,
+            "Video is unavailable, removed, or deleted",
+            "1. Verify the URL is correct\n"
+            "2. Check if the video exists in your browser\n"
+            "3. Try a different video URL"
+        )
+    
+    if "geo" in error_lower or "not available in your country" in error_lower or "region" in error_lower:
+        return (
+            ErrorClassification.ERR_GEO_BLOCK,
+            "Video is geo-blocked or region-restricted",
+            "1. This video cannot be accessed from your location\n"
+            "2. Consider using a VPN (if permitted)\n"
+            "3. Try a different video available in your region"
+        )
+    
+    if "sign in" in error_lower or "login" in error_lower or "authenticate" in error_lower or "age" in error_lower:
+        return (
+            ErrorClassification.ERR_LOGIN_REQUIRED,
+            "Video requires authentication or age verification",
+            "1. Video may be age-restricted or private\n"
+            "2. Try using cookies file with --cookies option\n"
+            "3. Ensure you have access to this content"
+        )
+    
+    if "network" in error_lower or "connection" in error_lower or "timeout" in error_lower or "http" in error_lower:
+        return (
+            ErrorClassification.ERR_NETWORK,
+            "Network or connection issue",
+            "1. Check your internet connection\n"
+            "2. Verify the URL is accessible in your browser\n"
+            "3. Try again in a few moments"
+        )
+    
+    # Default unknown error
+    return (
+        ErrorClassification.ERR_UNKNOWN,
+        "Unknown download error - see log for details",
+        "1. Update yt-dlp: pip install --upgrade yt-dlp\n"
+        "2. Check the detailed log file\n"
+        "3. Verify the URL works in your browser"
+    )
 
 
 def download_audio(url, out_dir) -> Tuple[Path, Dict]:
@@ -186,37 +267,28 @@ def download_audio(url, out_dir) -> Tuple[Path, Dict]:
             logger.error(f"Strategy '{strategy}' failed: {last_error}")
             continue
     
-    # All strategies failed
+    # All strategies failed - classify the error
     error_msg = f"Download failed after trying all format strategies."
     logger.error(error_msg)
     logger.error(f"Last error: {last_error}")
     logger.error("")
-    logger.error("TROUBLESHOOTING:")
-    logger.error("1. Update yt-dlp: pip install --upgrade yt-dlp")
     
-    # Generate helpful hints based on error
-    hints = []
-    if not js_runtime:
-        logger.error("2. Install Node.js for JavaScript runtime support")
-        hints.append("Install Node.js (https://nodejs.org/) for better video extraction compatibility")
+    # Classify error and get structured guidance
+    error_code, hint, next_steps = classify_error(str(last_error), js_runtime is not None)
     
-    if "Video unavailable" in str(last_error):
-        logger.error("3. Video may be geo-blocked or require login")
-        hints.append("Video may be geo-blocked or age-restricted")
+    logger.error(f"ERROR CLASSIFICATION: {error_code.value}")
+    logger.error("")
+    logger.error("NEXT STEPS:")
+    for line in next_steps.split('\n'):
+        logger.error(line)
     
-    if "Sign in" in str(last_error) or "login" in str(last_error).lower():
-        logger.error("4. Try using cookies file for authenticated content")
-        hints.append("Video may require authentication - consider using cookies")
-    
-    logger.error("5. Check if URL is accessible in your browser")
     logger.close()
-    
-    hint = " | ".join(hints) if hints else "Check the log file for details"
     
     raise DownloadError(
         error_msg, 
         log_file=str(log_file), 
         last_error=last_error,
         url=url,
-        hint=hint
+        hint=hint,
+        error_code=error_code
     )
