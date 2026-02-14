@@ -21,7 +21,7 @@ jobs:
       - name: Read current version
         id: current_version
         run: |
-          # Extract version from app.py line 5
+          # Extract version from app.py (expected on line 5)
           CURRENT_VERSION=$(grep -E '^\s*VERSION = "[0-9]+\.[0-9]+\.[0-9]+"' app.py | sed -E 's/.*VERSION = "([0-9]+\.[0-9]+\.[0-9]+)".*/\1/')
           if [ -z "$CURRENT_VERSION" ]; then
             echo "Error: Could not extract version from app.py"
