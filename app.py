@@ -38,9 +38,14 @@ ensure_dir(OUTPUT_ROOT)
 
 # Anti-overlap and filter thresholds
 OVERLAP_THRESHOLD = 0.30  # 30% overlap threshold for duplicate detection
-MIN_DURATION_SECONDS = 4.0  # Minimum clip duration
+MIN_DURATION_SECONDS = 4.0  # Minimum clip duration for initial hook detection
+MIN_CLIP_DURATION_SECONDS = 2.0  # Minimum duration after refinement (shorter clips rejected)
 DECAY_TAIL_DURATION = 0.75  # Extra audio tail for loops (seconds)
 MAX_SLUG_LENGTH = 24  # Maximum characters for slug in filename
+
+# Filename length constraints
+MAX_FILENAME_LENGTH = 140  # Maximum total filename length (OS compatibility)
+MAX_STEM_LENGTH = 130  # Reserve 10 chars for extension (_tail.mp3)
 
 MODE_OPTIONS = [
     "🎵 Song Hunter (Loops)",
@@ -379,9 +384,30 @@ with tab_link:
             download_entry = {"path": str(p), "youtube_info": youtube_info}
             st.session_state["downloaded_files"] = list(st.session_state.get("downloaded_files", [])) + [download_entry]
         except DownloadError as e:
+            # Display structured error classification
             st.error(f"❌ Download failed: {e}")
+            
+            # Show error classification if available
+            if hasattr(e, 'error_code') and e.error_code:
+                st.error(f"🏷️ **Error Classification:** `{e.error_code.value}`")
+            
+            # Show log file location
             if e.log_file:
-                st.error(f"📄 Log file saved: `{e.log_file}`")
+                st.info(f"📄 **Log file:** `{e.log_file}`")
+            
+            # Show hint
+            if e.hint:
+                st.warning(f"💡 **Diagnosis:** {e.hint}")
+            
+            # Show next steps in a structured way
+            if hasattr(e, 'error_code') and e.error_code:
+                from downloaders import classify_error, check_js_runtime
+                _, _, next_steps = classify_error(str(e.last_error) if e.last_error else "", check_js_runtime() is not None)
+                st.info("**Next Steps:**")
+                st.markdown(next_steps)
+            
+            # Show full log in expander
+            if e.log_file:
                 try:
                     with open(e.log_file, 'r') as f:
                         log_content = f.read()
@@ -389,8 +415,8 @@ with tab_link:
                         st.code(log_content, language="text")
                 except Exception as read_error:
                     st.warning(f"Could not read log file: {read_error}")
-            if e.hint:
-                st.warning(f"💡 Hint: {e.hint}")
+            
+            # Show technical details in expander
             if e.last_error:
                 with st.expander("🔍 Technical details"):
                     st.code(e.last_error, language="text")
@@ -535,13 +561,15 @@ if run_btn:
                     aa, bb = (a2, b2) if refined_ok else (a, b)
                     dur = max(0.0, bb - aa)
                     
-                    # Fallback to original if refined clip is too short
-                    min_duration = st.session_state["hook_len_range_min"]
-                    if refined_ok and dur < min_duration:
+                    # FIX: Don't override refinement based on min_duration
+                    # The prefer_bars setting should control clip length, not a hard minimum
+                    # Only reject clips that are genuinely too short (< MIN_CLIP_DURATION_SECONDS)
+                    if refined_ok and dur < MIN_CLIP_DURATION_SECONDS:
+                        # Clip is too short even after refinement - fall back to original
                         aa, bb = a, b
                         dur = max(0.0, bb - aa)
                         refined_ok = False
-                        rreason = "too_short"
+                        # Keep the original reason from refinement (likely "too_short" from beat_refine.py)
                     
                     # Get preference for bar snapping
                     prefer_bars = int(st.session_state.get("prefer_bars", 2))
@@ -596,9 +624,8 @@ if run_btn:
                     if st.session_state["use_slug"] and text:
                         slug = safe_slug(" ".join(text.split()[:int(st.session_state["slug_words"])]), max_len=MAX_SLUG_LENGTH)
                     
-                    # New filename template: {artist} - {title}__{idx:04d}__{bpm_used}bpm__{bars_used}bar__{start_mmss}-{end_mmss}__{slug}__{uid6}_tail.mp3
-                    start_mmss = mmss(aa)
-                    end_mmss = mmss(bb)
+                    # Filename format: {artist}-{title}__{idx}__{bpm}bpm__{bars}bar__{slug}__{uid6}.mp3
+                    # NO timestamps in main identifier per spec requirement
                     
                     # Build BPM/bars parts
                     if refined_ok:
@@ -614,8 +641,24 @@ if run_btn:
                     # slug_part
                     slug_part = slug if slug else "noslug"
                     
-                    # Build complete filename stem
-                    stem = f"{track_artist} - {track_title}__{idx:04d}__{bpm_part}__{bars_part}__{start_mmss}-{end_mmss}__{slug_part}__{uid}"
+                    # Build complete filename stem (NO timestamps)
+                    # Format: {artist}-{title}__{idx}__{bpm}bpm__{bars}bar__{slug}__{uid6}
+                    # Max length enforcement (see MAX_FILENAME_LENGTH and MAX_STEM_LENGTH constants)
+                    stem = f"{track_artist}-{track_title}__{idx:04d}__{bpm_part}__{bars_part}__{slug_part}__{uid}"
+                    
+                    # Enforce max length
+                    if len(stem) > MAX_STEM_LENGTH:
+                        # Truncate the slug part first, then title if needed
+                        excess = len(stem) - max_stem_len
+                        if len(slug_part) > 10:
+                            slug_part = slug_part[:max(4, len(slug_part) - excess)]
+                            stem = f"{track_artist}-{track_title}__{idx:04d}__{bpm_part}__{bars_part}__{slug_part}__{uid}"
+                        if len(stem) > MAX_STEM_LENGTH:
+                            # Still too long, truncate title
+                            title_len = len(track_title)
+                            excess = len(stem) - MAX_STEM_LENGTH
+                            track_title_trunc = track_title[:max(10, title_len - excess)]
+                            stem = f"{track_artist}-{track_title_trunc}__{idx:04d}__{bpm_part}__{bars_part}__{slug_part}__{uid}"
                     
                     # Export with tail
                     clip_path, export_meta = export_clip_with_tail(
@@ -675,6 +718,9 @@ if run_btn:
                         "bpm_clip_confidence": round(bpm_clip_confidence, 2),
                         "bpm_used": bpm_used,
                         "bpm_used_source": bpm_used_source,
+                        "bars_requested": prefer_bars,
+                        "bars_policy": "prefer_bars",
+                        "beats_per_bar": beats_per_bar,
                         "bars_estimated": raw_bars_estimate,
                         "bars_used": bars_used,
                         "bars_used_source": "refined_grid" if refined_ok else "estimated",
@@ -917,19 +963,62 @@ if "results" in st.session_state and st.session_state.results:
     selected = edited[edited["pick"] == True].copy()
     st.write(f"**Selected:** {len(selected)} clips")
     
-    # Preview section
-    with st.expander("🎧 Preview Selected (first 10)", expanded=True):
-        for idx, r in selected.head(10).iterrows():
-            p = Path(r["clip_path"])
-            col1, col2 = st.columns([3, 1])
-            with col1:
-                st.write(f"**{r['filename']}**")
-                st.caption(f"Duration: {float(r['dur_sec']):.2f}s | BPM: {r.get('bpm', 0)} | Tags: {r.get('tags', '')}")
-                if r.get("text"):
-                    st.write(f"📝 {r['text']}")
-            with col2:
-                if p.exists():
-                    st.audio(p.read_bytes())
+    # Sort by hook_score descending (if available)
+    if "hook_score" in selected.columns:
+        selected = selected.sort_values("hook_score", ascending=False)
+    
+    # Preview section - show ALL clips with pagination
+    clips_per_page = 20
+    total_clips = len(selected)
+    total_pages = (total_clips + clips_per_page - 1) // clips_per_page  # Ceiling division
+    
+    # Initialize page number in session state
+    if "preview_page" not in st.session_state:
+        st.session_state.preview_page = 0
+    
+    with st.expander(f"🎧 Preview Selected ({total_clips} clips)", expanded=True):
+        if total_clips > 0:
+            # Pagination controls
+            if total_pages > 1:
+                col_prev, col_info, col_next = st.columns([1, 2, 1])
+                with col_prev:
+                    if st.button("⬅️ Previous", disabled=st.session_state.preview_page == 0):
+                        st.session_state.preview_page = max(0, st.session_state.preview_page - 1)
+                        st.rerun()
+                with col_info:
+                    st.write(f"Page {st.session_state.preview_page + 1} of {total_pages}")
+                with col_next:
+                    if st.button("Next ➡️", disabled=st.session_state.preview_page >= total_pages - 1):
+                        st.session_state.preview_page = min(total_pages - 1, st.session_state.preview_page + 1)
+                        st.rerun()
+            
+            # Calculate page slice
+            start_idx = st.session_state.preview_page * clips_per_page
+            end_idx = min(start_idx + clips_per_page, total_clips)
+            page_clips = selected.iloc[start_idx:end_idx]
+            
+            # Display clips
+            for idx, r in page_clips.iterrows():
+                p = Path(r["clip_path"])
+                col1, col2 = st.columns([3, 1])
+                with col1:
+                    st.write(f"**{r['filename']}**")
+                    # Build caption with available fields
+                    caption_parts = [f"Duration: {float(r['dur_sec']):.2f}s"]
+                    if r.get('bpm_used', 0) > 0:
+                        caption_parts.append(f"BPM: {r.get('bpm_used', 0)}")
+                    if r.get('bars_used'):
+                        caption_parts.append(f"Bars: {r.get('bars_used')}")
+                    if r.get('hook_score', 0) > 0:
+                        caption_parts.append(f"Score: {r.get('hook_score', 0):.2f}")
+                    if r.get('tags'):
+                        caption_parts.append(f"Tags: {r.get('tags', '')}")
+                    st.caption(" | ".join(caption_parts))
+                    if r.get("text"):
+                        st.write(f"📝 {r['text']}")
+                with col2:
+                    if p.exists():
+                        st.audio(p.read_bytes())
     
     # Export ZIP
     if st.button("📦 Export ZIP (Selected)", type="primary", use_container_width=True):
