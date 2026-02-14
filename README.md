@@ -54,6 +54,7 @@ Se **MERGE_TIL_MAIN.md** for guide til at gøre denne version til main.
 - ✅ **DEPLOYMENT_CHECKLIST.md** - Deployment checklist
 - 📊 **BRANCH_COMPARISON.md** - Branch comparison
 - 🔀 **MERGE_TIL_MAIN.md** - How to merge to main
+- 🧪 **README_SMOKE_TESTS.md** - Smoke test instructions
 
 ## 💻 Kør Lokalt
 
