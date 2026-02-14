@@ -132,7 +132,8 @@ def download_audio(url, out_dir) -> Tuple[Path, Dict]:
                 }
             
             # Try extractor fallback strategies
-            logger.info(f"Extractor strategy: player_client=['android', 'web']" if js_runtime else "Extractor strategy: default")
+            extractor_info = "player_client=['android', 'web']" if js_runtime else "default"
+            logger.info(f"Extractor strategy: {extractor_info}")
             
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=True)
@@ -194,26 +195,28 @@ def download_audio(url, out_dir) -> Tuple[Path, Dict]:
     logger.error("1. Update yt-dlp: pip install --upgrade yt-dlp")
     
     # Generate helpful hints based on error
-    hint = ""
+    hints = []
     if not js_runtime:
         logger.error("2. Install Node.js for JavaScript runtime support")
-        hint = "Install Node.js (https://nodejs.org/) for better video extraction compatibility"
+        hints.append("Install Node.js (https://nodejs.org/) for better video extraction compatibility")
     
     if "Video unavailable" in str(last_error):
         logger.error("3. Video may be geo-blocked or require login")
-        hint += " | Video may be geo-blocked or age-restricted"
+        hints.append("Video may be geo-blocked or age-restricted")
     
     if "Sign in" in str(last_error) or "login" in str(last_error).lower():
         logger.error("4. Try using cookies file for authenticated content")
-        hint += " | Video may require authentication - consider using cookies"
+        hints.append("Video may require authentication - consider using cookies")
     
     logger.error("5. Check if URL is accessible in your browser")
     logger.close()
+    
+    hint = " | ".join(hints) if hints else "Check the log file for details"
     
     raise DownloadError(
         error_msg, 
         log_file=str(log_file), 
         last_error=last_error,
         url=url,
-        hint=hint if hint else "Check the log file for details"
+        hint=hint
     )

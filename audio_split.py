@@ -257,8 +257,11 @@ def cut_segment_with_fades(
             if zc_end is not None:
                 adjusted_end = zc_end
                 zero_cross_applied = True
-        except Exception:
+        except Exception as e:
             # If zero-crossing fails, use original times
+            # Note: This is expected for very short clips or clips with no zero crossings
+            import logging
+            logging.debug(f"Zero-crossing alignment skipped: {e}")
             pass
     
     # Calculate export times

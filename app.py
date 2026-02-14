@@ -341,7 +341,7 @@ else:
         default_idx = 1  # Default to "2 bars"
     
     # Use radio without default parameter to avoid conflict
-    selected_bars_ui = st.sidebar.radio("Preferred loop length", bars_options, index=default_idx, key="prefer_bars_ui_widget")
+    selected_bars_ui = st.sidebar.radio("Preferred loop length", bars_options, index=default_idx, key="prefer_bars_selector")
     
     # Update session state from widget
     st.session_state["prefer_bars_ui"] = selected_bars_ui
@@ -387,8 +387,8 @@ with tab_link:
                         log_content = f.read()
                     with st.expander("📋 View full log"):
                         st.code(log_content, language="text")
-                except:
-                    pass
+                except Exception as read_error:
+                    st.warning(f"Could not read log file: {read_error}")
             if e.hint:
                 st.warning(f"💡 Hint: {e.hint}")
             if e.last_error:
