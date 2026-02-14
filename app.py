@@ -410,9 +410,10 @@ if run_btn:
                         "bpm": float(h.bpm),
                     })
                 
-                # Apply 4-second filter
-                candidates = filter_by_duration(candidates, min_duration=4.0)
-                st.write(f"✂️ After 4s filter: {len(candidates)} hooks")
+                # Apply minimum duration filter
+                min_duration = st.session_state["hook_len_range_min"]
+                candidates = filter_by_duration(candidates, min_duration=min_duration)
+                st.write(f"✂️ After {min_duration}s filter: {len(candidates)} hooks")
                 
                 # Apply anti-overlap
                 candidates = anti_overlap_keep_best(candidates)
@@ -433,7 +434,8 @@ if run_btn:
                     dur = max(0.0, bb - aa)
                     
                     # Fallback to original if refined clip is too short
-                    if refined_ok and dur < MIN_DURATION_SECONDS:
+                    min_duration = st.session_state["hook_len_range_min"]
+                    if refined_ok and dur < min_duration:
                         aa, bb = a, b
                         dur = max(0.0, bb - aa)
                         refined_ok = False
@@ -517,9 +519,10 @@ if run_btn:
                     min_segment_s=st.session_state["min_segment_s"],
                 )
                 
-                # Apply 4-second filter
-                intervals = [(a, b) for a, b in intervals if (b - a) >= 4.0]
-                st.write(f"✂️ Found {len(intervals)} segments (after 4s filter)")
+                # Apply minimum segment filter
+                min_duration = st.session_state["min_segment_s"]
+                intervals = [(a, b) for a, b in intervals if (b - a) >= min_duration]
+                st.write(f"✂️ Found {len(intervals)} segments (after {min_duration}s filter)")
                 
                 progress_bar = st.progress(0)
                 total_int = len(intervals)
