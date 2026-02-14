@@ -2,7 +2,7 @@
 import streamlit as st
 
 # Version number
-VERSION = "1.1.6"
+VERSION = "1.1.7"
 
 st.set_page_config(page_title=f"The Sample Machine v{VERSION}", layout="wide")
 
