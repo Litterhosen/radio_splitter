@@ -90,6 +90,12 @@ for k, v in DEFAULTS.items():
 # ----------------------------
 # Helper Functions
 # ----------------------------
+def bars_ui_to_int(bars_ui: str) -> int:
+    """Convert UI bar string to integer value"""
+    bars_mapping = {"1 bar": 1, "2 bars": 2}
+    return bars_mapping.get(bars_ui, 2)  # Default to 2 if unknown
+
+
 def get_whisper_language():
     """Convert UI language to whisper language code"""
     mapping = {"Auto": None, "Dansk": "da", "English": "en"}
@@ -265,9 +271,13 @@ else:
     st.sidebar.checkbox("Refine to beat grid", key="beat_refine")
     st.sidebar.number_input("Beats per bar", min_value=3, max_value=7, step=1, key="beats_per_bar")
     bars_options = ["1 bar", "2 bars"]
-    default_idx = bars_options.index(st.session_state.get("prefer_bars_ui", "2 bars"))
+    default_bars_ui = st.session_state.get("prefer_bars_ui", "2 bars")
+    try:
+        default_idx = bars_options.index(default_bars_ui)
+    except ValueError:
+        default_idx = 1  # Default to "2 bars"
     st.sidebar.radio("Preferred loop length", bars_options, index=default_idx, key="prefer_bars_ui")
-    st.session_state["prefer_bars"] = 1 if st.session_state.get("prefer_bars_ui", "2 bars") == "1 bar" else 2
+    st.session_state["prefer_bars"] = bars_ui_to_int(st.session_state.get("prefer_bars_ui", "2 bars"))
     st.sidebar.checkbox("Try both (choose best)", key="try_both_bars")
 
 # ----------------------------

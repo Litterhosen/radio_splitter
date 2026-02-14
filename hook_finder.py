@@ -56,12 +56,13 @@ def find_hooks(
     windows = []
     
     # Scan with multiple window sizes within the range for better detection
+    MIN_WINDOW_SIZE_DIFFERENCE = 1.0  # seconds
     window_sizes = [win_len]
     if max_len > min_len:
         # Add min and max if they're different from prefer_len
-        if abs(min_len - win_len) > 1.0:
+        if abs(min_len - win_len) > MIN_WINDOW_SIZE_DIFFERENCE:
             window_sizes.append(min_len)
-        if abs(max_len - win_len) > 1.0:
+        if abs(max_len - win_len) > MIN_WINDOW_SIZE_DIFFERENCE:
             window_sizes.append(max_len)
     
     for current_win_len in window_sizes:
