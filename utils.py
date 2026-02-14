@@ -1,5 +1,6 @@
 import re
 import subprocess
+import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, List
@@ -96,3 +97,39 @@ def run_cmd(cmd: List[str], check: bool = True) -> CmdResult:
     if check and res.rc != 0:
         raise RuntimeError(f"Command failed ({res.rc}): {' '.join(cmd)}\n{res.err}")
     return res
+
+
+def safe_dirname(name: str) -> str:
+    """
+    Create an OS-safe directory name by stripping unsafe characters.
+    Removes: [](){}|<>:;'"?*\\/
+    """
+    unsafe_chars = r'[\[\]\(\)\{\}\|<>:;\'"?*\\/]'
+    safe = re.sub(unsafe_chars, '', name)
+    safe = re.sub(r'\s+', '_', safe)
+    safe = re.sub(r'_+', '_', safe).strip('_')
+    return safe or "output"
+
+
+def clip_uid(source: str, start: float, end: float, idx: int) -> str:
+    """
+    Generate a deterministic 6-character UID from clip metadata.
+    Uses MD5 hash of source, start, end, and index.
+    """
+    data = f"{source}:{start}:{end}:{idx}"
+    hash_obj = hashlib.md5(data.encode('utf-8'))
+    return hash_obj.hexdigest()[:6]
+
+
+def estimate_bars_from_duration(dur_sec: float, bpm: float, beats_per_bar: int = 4) -> int:
+    """
+    Estimate number of bars from duration, BPM, and beats per bar.
+    Returns at least 1 bar if duration > 0.
+    """
+    if dur_sec <= 0 or bpm <= 0:
+        return 1
+    
+    beats_per_second = bpm / 60.0
+    total_beats = dur_sec * beats_per_second
+    bars = max(1, int(round(total_beats / beats_per_bar)))
+    return bars

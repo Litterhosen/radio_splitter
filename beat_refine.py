@@ -1,6 +1,7 @@
 import numpy as np
 import librosa
 from dataclasses import dataclass
+from utils import estimate_bars_from_duration
 
 
 @dataclass
@@ -12,6 +13,115 @@ class RefineResult:
     bars: int
     score: float
     reason: str
+    bars_estimated: int = 0
+    bpm_confidence: float = 0.0
+
+
+def refine_to_n_bars(
+    wav_path,
+    window_start,
+    window_end,
+    beats_per_bar=4,
+    prefer_bars=2,
+    sr=22050,
+):
+    """
+    Refine audio segment to exact N bars with beat grid alignment.
+    
+    Args:
+        wav_path: Path to audio file
+        window_start: Start time in seconds
+        window_end: End time in seconds
+        beats_per_bar: Number of beats per bar (default 4)
+        prefer_bars: Preferred number of bars (1, 2, 4, 8, 16)
+        sr: Sample rate
+    
+    Returns:
+        RefineResult with ok, start, end, bpm, bars, score, reason, bars_estimated, bpm_confidence
+    """
+    y, sr = librosa.load(wav_path, sr=sr)
+    y_segment = y[int(window_start * sr): int(window_end * sr)]
+    duration = len(y_segment) / float(sr)
+
+    if len(y_segment) < sr:
+        return RefineResult(
+            False, 0, 0, 0, 0, 0, "too_short",
+            bars_estimated=0, bpm_confidence=0.0
+        )
+
+    tempo, beats = librosa.beat.beat_track(y=y_segment, sr=sr)
+    
+    # Handle numpy array return from newer librosa
+    if hasattr(tempo, '__len__'):
+        tempo = tempo[0] if len(tempo) > 0 else 120.0
+    bpm = int(round(float(tempo)))
+    
+    # Calculate BPM confidence from beat interval consistency
+    if len(beats) > 2:
+        beat_times = librosa.frames_to_time(beats, sr=sr)
+        intervals = np.diff(beat_times)
+        if len(intervals) > 0:
+            cv = np.std(intervals) / (np.mean(intervals) + 1e-6)
+            bpm_confidence = max(0.0, min(1.0, 1.0 - cv))
+        else:
+            bpm_confidence = 0.0
+    else:
+        bpm_confidence = 0.0
+
+    # Estimate bars from duration
+    bars_estimated = estimate_bars_from_duration(duration, bpm, beats_per_bar)
+
+    if len(beats) == 0:
+        return RefineResult(
+            False, 0, 0, bpm, 0, 0, "no_onsets",
+            bars_estimated=bars_estimated, bpm_confidence=bpm_confidence
+        )
+
+    if len(beats) < beats_per_bar:
+        return RefineResult(
+            False, 0, 0, bpm, 0, 0, "not_enough_beats",
+            bars_estimated=bars_estimated, bpm_confidence=bpm_confidence
+        )
+
+    # Try fallback cascade: prefer_bars -> smaller values
+    cascade = []
+    if prefer_bars >= 16:
+        cascade = [16, 8, 4, 2, 1]
+    elif prefer_bars >= 8:
+        cascade = [8, 4, 2, 1]
+    elif prefer_bars >= 4:
+        cascade = [4, 2, 1]
+    elif prefer_bars >= 2:
+        cascade = [2, 1]
+    else:
+        cascade = [1]
+    
+    for bars in cascade:
+        beats_needed = beats_per_bar * bars
+        
+        # Fix off-by-one bug: need beats[beats_needed] to exist
+        if len(beats) < beats_needed + 1:
+            continue
+        
+        start_frame = beats[0]
+        end_frame = beats[beats_needed]
+        
+        start = librosa.frames_to_time(start_frame, sr=sr)
+        end = librosa.frames_to_time(end_frame, sr=sr)
+        
+        score = float(bpm / 200.0)
+        
+        return RefineResult(
+            True, start, end, bpm, bars, score, "",
+            bars_estimated=bars_estimated, bpm_confidence=bpm_confidence
+        )
+    
+    # Failed all cascades
+    reason = "low_confidence" if bpm_confidence < 0.4 else "not_enough_beats"
+    return RefineResult(
+        False, 0, 0, bpm, 0, 0, reason,
+        bars_estimated=bars_estimated, bpm_confidence=bpm_confidence
+    )
 
 
 def refine_best_1_or_2_bars(
@@ -22,34 +132,10 @@ def refine_best_1_or_2_bars(
     prefer_bars=1,
     sr=22050,
 ):
-    y, sr = librosa.load(wav_path, sr=sr)
-    y = y[int(window_start * sr): int(window_end * sr)]
-
-    if len(y) < sr:
-        return RefineResult(False, 0, 0, 0, 0, 0, "too short")
-
-    tempo, beats = librosa.beat.beat_track(y=y, sr=sr)
-    
-    # Handle numpy array return from newer librosa
-    if hasattr(tempo, '__len__'):
-        tempo = tempo[0] if len(tempo) > 0 else 120.0
-    bpm = int(round(float(tempo)))
-
-    if len(beats) < beats_per_bar:
-        return RefineResult(False, 0, 0, bpm, 0, 0, "not enough beats")
-
-    bars = prefer_bars
-    beats_needed = beats_per_bar * bars
-
-    if len(beats) <= beats_needed:
-        return RefineResult(False, 0, 0, bpm, 0, 0, "not enough beats for bars")
-
-    start_frame = beats[0]
-    end_frame = beats[beats_needed]
-
-    start = librosa.frames_to_time(start_frame, sr=sr)
-    end = librosa.frames_to_time(end_frame, sr=sr)
-
-    score = float(bpm / 200.0)
-
-    return RefineResult(True, start, end, bpm, bars, score, "")
+    """
+    Backward-compatible alias for refine_to_n_bars.
+    """
+    return refine_to_n_bars(
+        wav_path, window_start, window_end,
+        beats_per_bar, prefer_bars, sr
+    )
