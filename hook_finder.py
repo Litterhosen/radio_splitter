@@ -32,7 +32,7 @@ def ffmpeg_to_wav16k_mono(in_path, out_path):
     subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
-def estimate_bpm(y, sr):
+def estimate_bpm_with_confidence(y, sr):
     """
     Estimate BPM from audio segment with confidence metric.
     
@@ -175,7 +175,7 @@ def find_hooks(
             loopability = 1.0 / (1.0 + stability)
 
             score = energy * 0.6 + loopability * 0.4
-            segment_bpm, segment_confidence = estimate_bpm(seg, sr)
+            segment_bpm, segment_confidence = estimate_bpm_with_confidence(seg, sr)
             
             # Normalize segment BPM to global BPM
             normalized_bpm, bpm_source = normalize_bpm_to_prior(

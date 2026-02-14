@@ -39,6 +39,7 @@ ensure_dir(OUTPUT_ROOT)
 OVERLAP_THRESHOLD = 0.30  # 30% overlap threshold for duplicate detection
 MIN_DURATION_SECONDS = 4.0  # Minimum clip duration
 DECAY_TAIL_DURATION = 0.75  # Extra audio tail for loops (seconds)
+MAX_SLUG_LENGTH = 24  # Maximum characters for slug in filename
 
 MODE_OPTIONS = [
     "🎵 Song Hunter (Loops)",
@@ -477,8 +478,8 @@ if run_btn:
                         # Refined: use beat-grid aligned values
                         bpm_used = bpm_refined
                         bpm_used_source = "refined_grid"
-                        bars_estimated_raw = bars_est
-                        bars_used = bars  # Already snapped by refine
+                        bars_estimated_raw = bars_est  # bars_est is the raw estimate from refine result
+                        bars_used = bars  # bars is the refined result from beat grid
                         final_bpm_conf = bpm_conf
                         refined_reason = ""
                     else:
@@ -502,7 +503,8 @@ if run_btn:
                             bpm_used_source = "segment_estimate"
                             final_bpm_conf = bpm_clip_confidence
                         
-                        refined_reason = rreason if rreason else "disabled"
+                        # Use the reason from refinement attempt (disabled, too_short, no_onsets, etc.)
+                        refined_reason = rreason
                     
                     # Generate UID
                     uid = clip_uid(in_name, aa, bb, idx)
@@ -532,7 +534,7 @@ if run_btn:
                     # Generate slug (max 24 chars, use __noslug if empty)
                     slug = ""
                     if st.session_state["use_slug"] and text:
-                        slug = safe_slug(" ".join(text.split()[:int(st.session_state["slug_words"])]), max_len=24)
+                        slug = safe_slug(" ".join(text.split()[:int(st.session_state["slug_words"])]), max_len=MAX_SLUG_LENGTH)
                     
                     # Complete filename: use __noslug if no slug
                     if slug:
@@ -634,7 +636,7 @@ if run_btn:
                     # Generate slug (max 24 chars, use __noslug if empty)
                     slug = ""
                     if st.session_state["use_slug"] and text:
-                        slug = safe_slug(" ".join(text.split()[:int(st.session_state["slug_words"])]), max_len=24)
+                        slug = safe_slug(" ".join(text.split()[:int(st.session_state["slug_words"])]), max_len=MAX_SLUG_LENGTH)
                     
                     # Use __noslug if no slug
                     stem = f"{base}__{slug}" if slug else f"{base}__noslug"
