@@ -1,6 +1,10 @@
 # CRITICAL: st.set_page_config MUST be the VERY FIRST Streamlit call
 import streamlit as st
-st.set_page_config(page_title="The Sample Machine", layout="wide")
+
+# Version number
+VERSION = "1.0.0"
+
+st.set_page_config(page_title=f"The Sample Machine v{VERSION}", layout="wide")
 
 import io
 import json
@@ -56,8 +60,8 @@ DEFAULTS = {
     "whisper_language_ui": "Auto",
     "device": "cpu",
     "compute_type": "int8",
-    "noise_db": -35.0,
-    "min_silence_s": 0.7,
+    "noise_db": -28.0,
+    "min_silence_s": 0.4,
     "pad_s": 0.15,
     "min_segment_s": 1.2,
     "fixed_len": 8.0,
@@ -75,7 +79,8 @@ DEFAULTS = {
     "loops_per_chorus": 10,
     "beat_refine": True,
     "beats_per_bar": 4,
-    "prefer_bars": 1,
+    "prefer_bars": 2,
+    "prefer_bars_ui": "2 bars",
     "try_both_bars": True,
     "use_slug": True,
     "slug_words": 6,
@@ -89,6 +94,12 @@ for k, v in DEFAULTS.items():
 # ----------------------------
 # Helper Functions
 # ----------------------------
+def bars_ui_to_int(bars_ui: str) -> int:
+    """Convert UI bar string to integer value"""
+    bars_mapping = {"1 bar": 1, "2 bars": 2}
+    return bars_mapping.get(bars_ui, 2)  # Default to 2 if unknown
+
+
 def get_whisper_language():
     """Convert UI language to whisper language code"""
     mapping = {"Auto": None, "Dansk": "da", "English": "en"}
@@ -214,7 +225,7 @@ def maybe_refine_barloop(wav_for_analysis: Path, a: float, b: float):
 # ----------------------------
 # UI - Title and Description
 # ----------------------------
-st.title("🎛️ The Sample Machine")
+st.title(f"🎛️ The Sample Machine v{VERSION}")
 st.caption("Bilingual audio splitter with whisper transcription, hook detection, and theme tagging")
 
 # ----------------------------
@@ -248,8 +259,8 @@ if st.session_state["mode"] == "📻 Broadcast Hunter (Mix)":
     st.sidebar.slider("Min segment (sec)", 0.5, 10.0, step=0.1, key="min_segment_s")
 else:
     st.sidebar.subheader("🎵 Hook Detection")
-    st.sidebar.slider("Min hook length (sec)", 2.0, 30.0, step=0.5, key="hook_len_range_min", value=4.0)
-    st.sidebar.slider("Max hook length (sec)", 2.0, 30.0, step=0.5, key="hook_len_range_max", value=15.0)
+    st.sidebar.slider("Min hook length (sec)", 2.0, 30.0, step=0.5, key="hook_len_range_min")
+    st.sidebar.slider("Max hook length (sec)", 2.0, 30.0, step=0.5, key="hook_len_range_max")
     
     # Validate that min <= max
     if st.session_state["hook_len_range_min"] > st.session_state["hook_len_range_max"]:
@@ -263,8 +274,14 @@ else:
     st.sidebar.subheader("🎼 Beat Refinement")
     st.sidebar.checkbox("Refine to beat grid", key="beat_refine")
     st.sidebar.number_input("Beats per bar", min_value=3, max_value=7, step=1, key="beats_per_bar")
-    st.sidebar.radio("Preferred loop length", ["1 bar", "2 bars"], key="prefer_bars_ui")
-    st.session_state["prefer_bars"] = 1 if st.session_state.get("prefer_bars_ui", "1 bar") == "1 bar" else 2
+    bars_options = ["1 bar", "2 bars"]
+    default_bars_ui = st.session_state.get("prefer_bars_ui", "2 bars")
+    try:
+        default_idx = bars_options.index(default_bars_ui)
+    except ValueError:
+        default_idx = 1  # Default to "2 bars"
+    st.sidebar.radio("Preferred loop length", bars_options, index=default_idx, key="prefer_bars_ui")
+    st.session_state["prefer_bars"] = bars_ui_to_int(st.session_state.get("prefer_bars_ui", "2 bars"))
     st.sidebar.checkbox("Try both (choose best)", key="try_both_bars")
 
 # ----------------------------
@@ -415,8 +432,19 @@ if run_btn:
                     aa, bb = (a2, b2) if refined_ok else (a, b)
                     dur = max(0.0, bb - aa)
                     
+                    # Fallback to original if refined clip is too short
+                    if refined_ok and dur < MIN_DURATION_SECONDS:
+                        aa, bb = a, b
+                        dur = max(0.0, bb - aa)
+                        refined_ok = False
+                    
                     # Transcribe
                     base = f"{idx:04d}_{hhmmss_ms(aa)}_to_{hhmmss_ms(bb)}"
+                    
+                    # Add BPM and bar info
+                    if refined_ok:
+                        base = f"{base}_bpm{int(bpm)}_{int(bars)}bar"
+                    
                     wav_for_whisper = session_dir / f"{base}__whisper.wav"
                     cut_segment_to_wav(in_path, wav_for_whisper, aa, bb)
                     tjson = transcribe_wav(st.session_state.model, wav_for_whisper, language=lang)

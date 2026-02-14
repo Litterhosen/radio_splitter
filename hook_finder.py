@@ -1,6 +1,7 @@
 import numpy as np
 import librosa
 from dataclasses import dataclass
+from utils import find_ffmpeg
 
 
 @dataclass
@@ -16,8 +17,9 @@ class HookWindow:
 
 def ffmpeg_to_wav16k_mono(in_path, out_path):
     import subprocess
+    ffmpeg = find_ffmpeg()
     cmd = [
-        "ffmpeg",
+        ffmpeg,
         "-y",
         "-i", str(in_path),
         "-ac", "1",
@@ -47,34 +49,46 @@ def find_hooks(
     duration = librosa.get_duration(y=y, sr=sr)
 
     min_len, max_len = hook_len_range
-    win_len = prefer_len
+    # Clamp prefer_len to the specified range
+    win_len = max(min_len, min(prefer_len, max_len))
     hop = hop_s
 
     windows = []
-    t = 0.0
+    
+    # Scan with multiple window sizes within the range for better detection
+    MIN_WINDOW_SIZE_DIFFERENCE = 1.0  # seconds
+    window_sizes = [win_len]
+    if max_len > min_len:
+        # Add min and max if they're different from prefer_len
+        if abs(min_len - win_len) > MIN_WINDOW_SIZE_DIFFERENCE:
+            window_sizes.append(min_len)
+        if abs(max_len - win_len) > MIN_WINDOW_SIZE_DIFFERENCE:
+            window_sizes.append(max_len)
+    
+    for current_win_len in window_sizes:
+        t = 0.0
+        while t + current_win_len < duration:
+            start = t
+            end = t + current_win_len
+            s = int(start * sr)
+            e = int(end * sr)
+            seg = y[s:e]
 
-    while t + win_len < duration:
-        start = t
-        end = t + win_len
-        s = int(start * sr)
-        e = int(end * sr)
-        seg = y[s:e]
+            if len(seg) < sr:
+                break
 
-        if len(seg) < sr:
-            break
+            energy = float(np.mean(np.abs(seg)))
+            stability = float(np.std(seg))
+            loopability = 1.0 / (1.0 + stability)
 
-        energy = float(np.mean(np.abs(seg)))
-        stability = float(np.std(seg))
-        loopability = 1.0 / (1.0 + stability)
+            score = energy * 0.6 + loopability * 0.4
+            bpm = estimate_bpm(seg, sr)
 
-        score = energy * 0.6 + loopability * 0.4
-        bpm = estimate_bpm(seg, sr)
+            windows.append(
+                HookWindow(start, end, score, energy, loopability, stability, bpm)
+            )
 
-        windows.append(
-            HookWindow(start, end, score, energy, loopability, stability, bpm)
-        )
-
-        t += hop
+            t += hop
 
     windows.sort(key=lambda w: w.score, reverse=True)
 
