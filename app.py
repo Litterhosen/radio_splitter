@@ -22,12 +22,12 @@ from audio_split import (
     cut_segment_to_mp3,
 )
 from transcribe import load_model, transcribe_wav
-from downloaders import download_audio
+from downloaders import download_audio, DownloadError
 from tagging import auto_tags
 from jingle_finder import jingle_score
 from hook_finder import ffmpeg_to_wav16k_mono, find_hooks
 from beat_refine import refine_best_1_or_2_bars
-from utils import ensure_dir, hhmmss_ms, safe_slug
+from utils import ensure_dir, hhmmss_ms, safe_slug, safe_dirname, clip_uid, estimate_bars_from_duration
 
 # ----------------------------
 # Constants and Config
@@ -96,7 +96,13 @@ for k, v in DEFAULTS.items():
 # ----------------------------
 def bars_ui_to_int(bars_ui: str) -> int:
     """Convert UI bar string to integer value"""
-    bars_mapping = {"1 bar": 1, "2 bars": 2}
+    bars_mapping = {
+        "1 bar": 1, 
+        "2 bars": 2, 
+        "4 bars": 4, 
+        "8 bars": 8, 
+        "16 bars": 16
+    }
     return bars_mapping.get(bars_ui, 2)  # Default to 2 if unknown
 
 
@@ -149,14 +155,18 @@ def save_input_to_session_dir(src_type: str, name_or_path: str, maybe_bytes):
     """Save uploaded or downloaded file to session directory"""
     if src_type == "upload":
         in_name = name_or_path
-        session_dir = ensure_dir(OUTPUT_ROOT / Path(in_name).stem)
+        # Use safe_dirname for session directory
+        safe_name = safe_dirname(Path(in_name).stem)
+        session_dir = ensure_dir(OUTPUT_ROOT / safe_name)
         in_path = session_dir / in_name
         in_path.write_bytes(maybe_bytes)
         return in_path, session_dir, in_name
 
     p = Path(name_or_path)
     in_name = p.name
-    session_dir = ensure_dir(OUTPUT_ROOT / p.stem)
+    # Use safe_dirname for session directory
+    safe_name = safe_dirname(p.stem)
+    session_dir = ensure_dir(OUTPUT_ROOT / safe_name)
     local_in = session_dir / in_name
     if not local_in.exists():
         local_in.write_bytes(p.read_bytes())
@@ -193,7 +203,11 @@ def export_clip_with_tail(
 def maybe_refine_barloop(wav_for_analysis: Path, a: float, b: float):
     """Refine loop to beat grid if enabled"""
     if not st.session_state["beat_refine"]:
-        return a, b, 0, 0, 0.0, False, "disabled"
+        dur = b - a
+        # Estimate bars even when disabled
+        bpm_estimate = 120  # Default fallback
+        bars_est = estimate_bars_from_duration(dur, bpm_estimate, 4)
+        return a, b, 0, None, 0.0, False, "disabled", bars_est, 0.0
 
     beats_per_bar = int(st.session_state["beats_per_bar"])
     prefer_bars = int(st.session_state["prefer_bars"])
@@ -216,10 +230,12 @@ def maybe_refine_barloop(wav_for_analysis: Path, a: float, b: float):
             rr.bars,
             rr.score,
             True,
-            ""
+            "",
+            rr.bars_estimated,
+            rr.bpm_confidence
         )
 
-    return a, b, rr.bpm, rr.bars, rr.score, False, rr.reason
+    return a, b, rr.bpm, None, rr.score, False, rr.reason, rr.bars_estimated, rr.bpm_confidence
 
 
 # ----------------------------
@@ -274,7 +290,7 @@ else:
     st.sidebar.subheader("🎼 Beat Refinement")
     st.sidebar.checkbox("Refine to beat grid", key="beat_refine")
     st.sidebar.number_input("Beats per bar", min_value=3, max_value=7, step=1, key="beats_per_bar")
-    bars_options = ["1 bar", "2 bars"]
+    bars_options = ["1 bar", "2 bars", "4 bars", "8 bars", "16 bars"]
     default_bars_ui = st.session_state.get("prefer_bars_ui", "2 bars")
     try:
         default_idx = bars_options.index(default_bars_ui)
@@ -312,6 +328,11 @@ with tab_link:
                 p = download_audio(url.strip(), OUTPUT_ROOT / "Downloads")
             st.success(f"✅ Downloaded: {p.name}")
             st.session_state["downloaded_files"] = list(st.session_state.get("downloaded_files", [])) + [str(p)]
+        except DownloadError as e:
+            st.error(f"❌ Download failed: {e}")
+            if e.log_file:
+                st.error(f"📄 Log file: {e.log_file}")
+                st.info("Check the log file for detailed error information.")
         except Exception as e:
             st.error(f"❌ Download error: {e}")
 
@@ -384,7 +405,7 @@ if run_btn:
             # ----------------------------
             if mode_now == "🎵 Song Hunter (Loops)":
                 st.write("🎵 Finding hooks...")
-                hooks = find_hooks(
+                hooks, global_bpm, global_confidence = find_hooks(
                     wav16,
                     hook_len_range=(
                         st.session_state["hook_len_range_min"],
@@ -396,6 +417,7 @@ if run_btn:
                     min_gap_s=st.session_state["hook_gap"],
                 )
                 st.write(f"🎉 Found {len(hooks)} potential hooks!")
+                st.write(f"🎼 Global BPM: {global_bpm} (confidence: {global_confidence:.2f})")
                 
                 # Convert to candidate format
                 candidates = []
@@ -408,6 +430,8 @@ if run_btn:
                         "energy": float(h.energy),
                         "loopability": float(h.loopability),
                         "bpm": float(h.bpm),
+                        "bpm_confidence": float(h.bpm_confidence),
+                        "bpm_source": h.bpm_source,
                     })
                 
                 # Apply minimum duration filter
@@ -429,7 +453,7 @@ if run_btn:
                     a, b = float(cand["start"]), float(cand["end"])
                     
                     # Beat refinement
-                    a2, b2, bpm, bars, rscore, refined_ok, rreason = maybe_refine_barloop(wav16, a, b)
+                    a2, b2, bpm_refined, bars, rscore, refined_ok, rreason, bars_est, bpm_conf = maybe_refine_barloop(wav16, a, b)
                     aa, bb = (a2, b2) if refined_ok else (a, b)
                     dur = max(0.0, bb - aa)
                     
@@ -439,14 +463,48 @@ if run_btn:
                         aa, bb = a, b
                         dur = max(0.0, bb - aa)
                         refined_ok = False
+                        rreason = "fallback_to_original"
                     
-                    # Transcribe
+                    # Determine final BPM, bars, confidence, and source
+                    if refined_ok:
+                        final_bpm = bpm_refined
+                        final_bars = bars
+                        final_bpm_conf = bpm_conf
+                        final_bpm_source = "refined_grid"
+                        bars_source = "refined_grid"
+                        refined_reason = ""
+                    else:
+                        # Use segment BPM estimate
+                        final_bpm = int(cand.get("bpm", global_bpm))
+                        final_bars = bars_est if bars_est > 0 else estimate_bars_from_duration(dur, final_bpm, 4)
+                        final_bpm_conf = cand.get("bpm_confidence", global_confidence)
+                        final_bpm_source = cand.get("bpm_source", "track_global")
+                        bars_source = "estimated"
+                        refined_reason = rreason
+                    
+                    # Generate UID
+                    uid = clip_uid(in_name, aa, bb, idx)
+                    
+                    # Build filename with BPM/bars info
                     base = f"{idx:04d}_{hhmmss_ms(aa)}_to_{hhmmss_ms(bb)}"
                     
-                    # Add BPM and bar info
-                    if refined_ok:
-                        base = f"{base}_bpm{int(bpm)}_{int(bars)}bar"
+                    # Add BPM and bars info with confidence markers
+                    bpm_suffix = ""
+                    bars_suffix = ""
                     
+                    if refined_ok:
+                        # Clean refined result
+                        bpm_part = f"bpm{final_bpm}"
+                        bars_part = f"{final_bars}bar"
+                    else:
+                        # Estimated with confidence markers
+                        if final_bpm_conf < 0.4:
+                            bpm_part = f"bpm{final_bpm}_low"
+                        else:
+                            bpm_part = f"bpm{final_bpm}_est"
+                        bars_part = f"{final_bars}bar_est"
+                    
+                    # Transcribe
                     wav_for_whisper = session_dir / f"{base}__whisper.wav"
                     cut_segment_to_wav(in_path, wav_for_whisper, aa, bb)
                     tjson = transcribe_wav(st.session_state.model, wav_for_whisper, language=lang)
@@ -457,7 +515,8 @@ if run_btn:
                     if st.session_state["use_slug"] and text:
                         slug = safe_slug(" ".join(text.split()[:int(st.session_state["slug_words"])]))
                     
-                    stem = f"{base}__{slug}" if slug else base
+                    # Complete filename: {idx}_{start}_to_{end}_{bpm_part}_{bars_part}__{slug}_{uid}_tail.ext
+                    stem = f"{base}_{bpm_part}_{bars_part}__{slug}_{uid}" if slug else f"{base}_{bpm_part}_{bars_part}_{uid}"
                     
                     # Export with tail
                     clip_path = export_clip_with_tail(
@@ -477,7 +536,10 @@ if run_btn:
                     
                     # Tags and themes
                     tags = ["musik", "hook"]
-                    tags += [f"{bars}bar"] if refined_ok else ["unrefined"]
+                    if final_bars:
+                        tags.append(f"{final_bars}bar")
+                    if not refined_ok:
+                        tags.append("unrefined")
                     if text:
                         tags = list(set(tags + auto_tags(text)))
                     themes = detect_themes(text)
@@ -490,9 +552,13 @@ if run_btn:
                         "start_sec": aa,
                         "end_sec": bb,
                         "dur_sec": dur,
-                        "bpm": int(bpm) if refined_ok else int(cand.get("bpm", 0)),
-                        "bars": int(bars) if refined_ok else 0,
+                        "bpm": final_bpm,
+                        "bars": final_bars,
+                        "bars_source": bars_source,
                         "refined": bool(refined_ok),
+                        "refined_reason": refined_reason,
+                        "bpm_confidence": round(final_bpm_conf, 2),
+                        "bpm_source": final_bpm_source,
                         "tags": ", ".join(sorted(tags)),
                         "themes": ", ".join(themes),
                         "hook_score": cand.get("hook_score", 0.0),
@@ -576,6 +642,12 @@ if run_btn:
                         "end_sec": b,
                         "dur_sec": dur,
                         "bpm": 0,
+                        "bars": None,
+                        "bars_source": "unknown",
+                        "refined": False,
+                        "refined_reason": "",
+                        "bpm_confidence": 0.0,
+                        "bpm_source": "unknown",
                         "tags": ", ".join(tags),
                         "themes": ", ".join(themes),
                         "jingle_score": score,
@@ -596,6 +668,45 @@ if run_btn:
             status.update(label=f"✅ Success! Found {len(results)} clips", state="complete")
             st.balloons()
             st.success(f"🎉 Finished! Found {len(results)} clips. Scroll down to preview.")
+            
+            # Generate QA Report for Song Hunter mode
+            if mode_now == "🎵 Song Hunter (Loops)":
+                qa_report = {
+                    "total_clips": len(results),
+                    "refined_ok": sum(1 for r in results if r.get("refined", False)),
+                    "refined_fail": sum(1 for r in results if not r.get("refined", False)),
+                    "global_bpm": global_bpm if 'global_bpm' in locals() else 0,
+                    "global_confidence": round(global_confidence, 2) if 'global_confidence' in locals() else 0.0,
+                }
+                
+                # BPM statistics
+                bpms = [r.get("bpm", 0) for r in results if r.get("bpm", 0) > 0]
+                if bpms:
+                    qa_report["bpm_min"] = min(bpms)
+                    qa_report["bpm_max"] = max(bpms)
+                    qa_report["bpm_median"] = int(pd.Series(bpms).median())
+                
+                # Top hooks by score
+                sorted_results = sorted(results, key=lambda r: r.get("hook_score", 0), reverse=True)
+                qa_report["top_hooks"] = [
+                    {
+                        "clip": r.get("clip"),
+                        "score": round(r.get("hook_score", 0), 2),
+                        "bpm": r.get("bpm"),
+                        "bars": r.get("bars"),
+                    }
+                    for r in sorted_results[:10]
+                ]
+                
+                # Refined fail reasons breakdown
+                reasons = {}
+                for r in results:
+                    if not r.get("refined", False):
+                        reason = r.get("refined_reason", "unknown")
+                        reasons[reason] = reasons.get(reason, 0) + 1
+                qa_report["refined_fail_reasons"] = reasons
+                
+                st.session_state.qa_report = qa_report
 
 # ----------------------------
 # Results Browser / Export
@@ -603,6 +714,34 @@ if run_btn:
 if "results" in st.session_state and st.session_state.results:
     st.divider()
     st.subheader("📊 Results Browser")
+    
+    # Display QA Report if available
+    if "qa_report" in st.session_state:
+        with st.expander("📊 QA Report", expanded=False):
+            qa = st.session_state.qa_report
+            
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                st.metric("Total Clips", qa.get("total_clips", 0))
+            with col2:
+                st.metric("Refined OK", qa.get("refined_ok", 0))
+            with col3:
+                st.metric("Refined Fail", qa.get("refined_fail", 0))
+            with col4:
+                st.metric("Global BPM", f"{qa.get('global_bpm', 0)} ({qa.get('global_confidence', 0):.2f})")
+            
+            if "bpm_min" in qa:
+                st.write(f"**BPM Range:** {qa['bpm_min']} - {qa['bpm_max']} (median: {qa['bpm_median']})")
+            
+            if qa.get("refined_fail_reasons"):
+                st.write("**Refined Fail Reasons:**")
+                for reason, count in sorted(qa["refined_fail_reasons"].items(), key=lambda x: x[1], reverse=True):
+                    st.write(f"  - {reason}: {count}")
+            
+            if qa.get("top_hooks"):
+                st.write("**Top 10 Hooks by Score:**")
+                top_df = pd.DataFrame(qa["top_hooks"])
+                st.dataframe(top_df, use_container_width=True, hide_index=True)
     
     df = pd.DataFrame(st.session_state.results)
     if "pick" not in df.columns:
