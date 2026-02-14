@@ -38,9 +38,14 @@ ensure_dir(OUTPUT_ROOT)
 
 # Anti-overlap and filter thresholds
 OVERLAP_THRESHOLD = 0.30  # 30% overlap threshold for duplicate detection
-MIN_DURATION_SECONDS = 4.0  # Minimum clip duration
+MIN_DURATION_SECONDS = 4.0  # Minimum clip duration for initial hook detection
+MIN_CLIP_DURATION_SECONDS = 2.0  # Minimum duration after refinement (shorter clips rejected)
 DECAY_TAIL_DURATION = 0.75  # Extra audio tail for loops (seconds)
 MAX_SLUG_LENGTH = 24  # Maximum characters for slug in filename
+
+# Filename length constraints
+MAX_FILENAME_LENGTH = 140  # Maximum total filename length (OS compatibility)
+MAX_STEM_LENGTH = 130  # Reserve 10 chars for extension (_tail.mp3)
 
 MODE_OPTIONS = [
     "🎵 Song Hunter (Loops)",
@@ -558,8 +563,8 @@ if run_btn:
                     
                     # FIX: Don't override refinement based on min_duration
                     # The prefer_bars setting should control clip length, not a hard minimum
-                    # Only reject clips that are genuinely too short (< 2.0 seconds)
-                    if refined_ok and dur < 2.0:
+                    # Only reject clips that are genuinely too short (< MIN_CLIP_DURATION_SECONDS)
+                    if refined_ok and dur < MIN_CLIP_DURATION_SECONDS:
                         # Clip is too short even after refinement - fall back to original
                         aa, bb = a, b
                         dur = max(0.0, bb - aa)
@@ -638,22 +643,20 @@ if run_btn:
                     
                     # Build complete filename stem (NO timestamps)
                     # Format: {artist}-{title}__{idx}__{bpm}bpm__{bars}bar__{slug}__{uid6}
-                    # Max length 140 chars total
+                    # Max length enforcement (see MAX_FILENAME_LENGTH and MAX_STEM_LENGTH constants)
                     stem = f"{track_artist}-{track_title}__{idx:04d}__{bpm_part}__{bars_part}__{slug_part}__{uid}"
                     
-                    # Enforce max length (140 chars for full filename including extension)
-                    # Reserve 10 chars for extension and _tail suffix
-                    max_stem_len = 130
-                    if len(stem) > max_stem_len:
+                    # Enforce max length
+                    if len(stem) > MAX_STEM_LENGTH:
                         # Truncate the slug part first, then title if needed
                         excess = len(stem) - max_stem_len
                         if len(slug_part) > 10:
                             slug_part = slug_part[:max(4, len(slug_part) - excess)]
                             stem = f"{track_artist}-{track_title}__{idx:04d}__{bpm_part}__{bars_part}__{slug_part}__{uid}"
-                        if len(stem) > max_stem_len:
+                        if len(stem) > MAX_STEM_LENGTH:
                             # Still too long, truncate title
                             title_len = len(track_title)
-                            excess = len(stem) - max_stem_len
+                            excess = len(stem) - MAX_STEM_LENGTH
                             track_title_trunc = track_title[:max(10, title_len - excess)]
                             stem = f"{track_artist}-{track_title_trunc}__{idx:04d}__{bpm_part}__{bars_part}__{slug_part}__{uid}"
                     

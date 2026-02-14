@@ -26,7 +26,7 @@ class DownloadError(Exception):
         self.last_error = last_error
         self.url = url
         self.hint = hint
-        self.error_code = error_code  # ErrorClassification enum value
+        self.error_code = error_code  # Optional[ErrorClassification] enum value
 
 
 class YTDLPLogger:
