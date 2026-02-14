@@ -478,20 +478,20 @@ if run_btn:
                         # Refined: use beat-grid aligned values
                         bpm_used = bpm_refined
                         bpm_used_source = "refined_grid"
-                        bars_estimated_raw = bars_est  # bars_est is the raw estimate from refine result
-                        bars_used = bars  # bars is the refined result from beat grid
+                        raw_bars_estimate = bars_est  # Raw estimate before grid alignment
+                        bars_used = bars  # Grid-aligned bars
                         final_bpm_conf = bpm_conf
                         refined_reason = ""
                     else:
                         # Not refined: use estimates with snapping
                         # Calculate raw bars estimate
                         if bars_est > 0:
-                            bars_estimated_raw = bars_est
+                            raw_bars_estimate = bars_est
                         else:
-                            bars_estimated_raw = estimate_bars_from_duration(dur, bpm_clip, 4)
+                            raw_bars_estimate = estimate_bars_from_duration(dur, bpm_clip, 4)
                         
                         # Snap bars to valid values
-                        bars_used = snap_bars_to_valid(bars_estimated_raw, prefer_bars, tolerance=0.25)
+                        bars_used = snap_bars_to_valid(raw_bars_estimate, prefer_bars, tolerance=0.25)
                         
                         # Determine BPM to use: prefer global if high confidence
                         if cand.get("bpm_source") == "track_global":
@@ -582,7 +582,7 @@ if run_btn:
                         "bpm_clip_confidence": round(bpm_clip_confidence, 2),
                         "bpm_used": bpm_used,
                         "bpm_used_source": bpm_used_source,
-                        "bars_estimated": bars_estimated_raw,
+                        "bars_estimated": raw_bars_estimate,
                         "bars_used": bars_used,
                         "refined": bool(refined_ok),
                         "refined_reason": refined_reason,

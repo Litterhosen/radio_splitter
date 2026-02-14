@@ -36,6 +36,10 @@ def estimate_bpm_with_confidence(y, sr):
     """
     Estimate BPM from audio segment with confidence metric.
     
+    Args:
+        y: Audio time series (numpy array)
+        sr: Sample rate of audio
+    
     Returns:
         (bpm, confidence) where confidence is based on beat interval consistency (0.0-1.0)
     """
@@ -64,6 +68,10 @@ def estimate_bpm_with_confidence(y, sr):
 def estimate_global_bpm(y, sr):
     """
     Estimate global BPM for entire track with confidence metric.
+    
+    Args:
+        y: Audio time series (numpy array)
+        sr: Sample rate of audio
     
     Returns:
         (bpm, confidence) where confidence is based on beat interval consistency (0.0-1.0)
