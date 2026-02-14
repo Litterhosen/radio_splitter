@@ -142,7 +142,25 @@ def find_hooks(
     hop_s=1.0,
     topn=12,
     min_gap_s=2.0,
+    prefer_bars=None,
+    beats_per_bar=4,
 ):
+    """
+    Find hook windows with optional bar-based length calculation.
+    
+    Args:
+        wav_path: Path to audio file
+        hook_len_range: (min, max) hook length in seconds
+        prefer_len: Preferred length in seconds (fallback if prefer_bars not provided)
+        hop_s: Hop size for scanning in seconds
+        topn: Number of top hooks to return
+        min_gap_s: Minimum gap between hooks in seconds
+        prefer_bars: Preferred number of bars (1, 2, 4, 8, 16) - overrides prefer_len
+        beats_per_bar: Number of beats per bar (default 4)
+    
+    Returns:
+        Tuple of (hooks, global_bpm, global_confidence)
+    """
     y, sr = librosa.load(wav_path, sr=22050)
     duration = librosa.get_duration(y=y, sr=sr)
     
@@ -150,8 +168,19 @@ def find_hooks(
     global_bpm, global_confidence = estimate_global_bpm(y, sr)
 
     min_len, max_len = hook_len_range
-    # Clamp prefer_len to the specified range
-    win_len = max(min_len, min(prefer_len, max_len))
+    
+    # Calculate target window length based on prefer_bars if provided
+    if prefer_bars is not None and prefer_bars > 0 and global_bpm > 0:
+        # Calculate bar duration: (60 / BPM) * beats_per_bar
+        bar_duration = (60.0 / global_bpm) * beats_per_bar
+        target_len = prefer_bars * bar_duration
+        
+        # Clamp to range with some flexibility
+        win_len = max(min_len, min(target_len, max_len))
+    else:
+        # Fallback to prefer_len
+        win_len = max(min_len, min(prefer_len, max_len))
+    
     hop = hop_s
 
     windows = []

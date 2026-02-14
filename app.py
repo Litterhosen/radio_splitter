@@ -2,7 +2,7 @@
 import streamlit as st
 
 # Version number
-VERSION = "1.1.3"
+VERSION = "1.1.4"
 
 st.set_page_config(page_title=f"The Sample Machine v{VERSION}", layout="wide")
 
@@ -10,7 +10,7 @@ import io
 import json
 import zipfile
 from pathlib import Path
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Tuple
 
 import pandas as pd
 
@@ -20,6 +20,7 @@ from audio_split import (
     fixed_length_intervals,
     cut_segment_to_wav,
     cut_segment_to_mp3,
+    cut_segment_with_fades,
 )
 from transcribe import load_model, transcribe_wav
 from downloaders import download_audio, DownloadError
@@ -181,24 +182,63 @@ def export_clip_with_tail(
     a: float, 
     b: float, 
     want_format: str,
-    add_tail: bool = True
-) -> Path:
-    """Export clip with optional decay tail"""
-    tail_duration = DECAY_TAIL_DURATION if add_tail else 0.0
-    b_with_tail = b + tail_duration
+    add_tail: bool = True,
+    add_fades: bool = True
+) -> Tuple[Path, dict]:
+    """
+    Export clip with optional decay tail and fades.
     
-    # Determine file extension and suffix
+    Returns:
+        Tuple of (clip_path, export_metadata_dict)
+    """
+    tail_duration = DECAY_TAIL_DURATION if add_tail else 0.0
+    
+    # Determine file extension
     is_wav = want_format.startswith("wav")
     ext = "wav" if is_wav else "mp3"
     suffix = "_tail" if add_tail else ""
     outp = session_dir / f"{stem}{suffix}.{ext}"
     
-    if is_wav:
-        cut_segment_to_wav(in_path, outp, a, b_with_tail)
+    # Use new export function with fades if enabled for Song Hunter
+    if add_fades:
+        export_meta = cut_segment_with_fades(
+            in_path, 
+            outp, 
+            core_start=a, 
+            core_end=b,
+            pre_roll_ms=25.0,
+            fade_in_ms=15.0,
+            fade_out_ms=15.0,
+            tail_sec=tail_duration,
+            apply_zero_crossing=True,
+            bitrate="192k",
+            is_wav=is_wav
+        )
+        return outp, export_meta
     else:
-        cut_segment_to_mp3(in_path, outp, a, b_with_tail, bitrate="192k")
-    
-    return outp
+        # Legacy export without fades for broadcast mode
+        b_with_tail = b + tail_duration
+        
+        if is_wav:
+            cut_segment_to_wav(in_path, outp, a, b_with_tail)
+        else:
+            cut_segment_to_mp3(in_path, outp, a, b_with_tail, bitrate="192k")
+        
+        # Return simple metadata for backward compatibility
+        export_meta = {
+            "core_start_sec": float(a),
+            "core_end_sec": float(b),
+            "core_dur_sec": float(b - a),
+            "export_start_sec": float(a),
+            "export_end_sec": float(b_with_tail),
+            "export_dur_sec": float(b_with_tail - a),
+            "pre_roll_ms": 0.0,
+            "fade_in_ms": 0.0,
+            "fade_out_ms": 0.0,
+            "tail_sec": float(tail_duration),
+            "zero_cross_applied": False,
+        }
+        return outp, export_meta
 
 
 def maybe_refine_barloop(wav_for_analysis: Path, a: float, b: float):
@@ -292,13 +332,20 @@ else:
     st.sidebar.checkbox("Refine to beat grid", key="beat_refine")
     st.sidebar.number_input("Beats per bar", min_value=3, max_value=7, step=1, key="beats_per_bar")
     bars_options = ["1 bar", "2 bars", "4 bars", "8 bars", "16 bars"]
-    default_bars_ui = st.session_state.get("prefer_bars_ui", "2 bars")
+    
+    # Get current value from session state or use default
+    current_bars_ui = st.session_state.get("prefer_bars_ui", "2 bars")
     try:
-        default_idx = bars_options.index(default_bars_ui)
+        default_idx = bars_options.index(current_bars_ui)
     except ValueError:
         default_idx = 1  # Default to "2 bars"
-    st.sidebar.radio("Preferred loop length", bars_options, index=default_idx, key="prefer_bars_ui")
-    st.session_state["prefer_bars"] = bars_ui_to_int(st.session_state.get("prefer_bars_ui", "2 bars"))
+    
+    # Use radio without default parameter to avoid conflict
+    selected_bars_ui = st.sidebar.radio("Preferred loop length", bars_options, index=default_idx, key="prefer_bars_ui_widget")
+    
+    # Update session state from widget
+    st.session_state["prefer_bars_ui"] = selected_bars_ui
+    st.session_state["prefer_bars"] = bars_ui_to_int(selected_bars_ui)
     st.sidebar.checkbox("Try both (choose best)", key="try_both_bars")
 
 # ----------------------------
@@ -334,16 +381,21 @@ with tab_link:
         except DownloadError as e:
             st.error(f"❌ Download failed: {e}")
             if e.log_file:
-                st.error(f"📄 Log file: {e.log_file}")
-                with open(e.log_file, 'r') as f:
-                    log_content = f.read()
-                with st.expander("View log content"):
-                    st.code(log_content, language="text")
+                st.error(f"📄 Log file saved: `{e.log_file}`")
+                try:
+                    with open(e.log_file, 'r') as f:
+                        log_content = f.read()
+                    with st.expander("📋 View full log"):
+                        st.code(log_content, language="text")
+                except:
+                    pass
+            if e.hint:
+                st.warning(f"💡 Hint: {e.hint}")
             if e.last_error:
-                st.warning(f"Last error: {e.last_error}")
-            st.info("💡 Troubleshooting:\n1. Update yt-dlp: `pip install --upgrade yt-dlp`\n2. Check if URL is accessible\n3. Try using cookies file if login required")
+                with st.expander("🔍 Technical details"):
+                    st.code(e.last_error, language="text")
         except Exception as e:
-            st.error(f"❌ Download error: {e}")
+            st.error(f"❌ Unexpected error: {e}")
 
 # Prepare input paths
 input_paths = []
@@ -423,6 +475,11 @@ if run_btn:
             # ----------------------------
             if mode_now == "🎵 Song Hunter (Loops)":
                 st.write("🎵 Finding hooks...")
+                
+                # Get prefer_bars from session state
+                prefer_bars = int(st.session_state.get("prefer_bars", 2))
+                beats_per_bar = int(st.session_state.get("beats_per_bar", 4))
+                
                 hooks, global_bpm, global_confidence = find_hooks(
                     wav16,
                     hook_len_range=(
@@ -433,6 +490,8 @@ if run_btn:
                     hop_s=st.session_state["hook_hop"],
                     topn=st.session_state["hook_topn"],
                     min_gap_s=st.session_state["hook_gap"],
+                    prefer_bars=prefer_bars,
+                    beats_per_bar=beats_per_bar,
                 )
                 st.write(f"🎉 Found {len(hooks)} potential hooks!")
                 st.write(f"🎼 Global BPM: {global_bpm} (confidence: {global_confidence:.2f})")
@@ -559,10 +618,11 @@ if run_btn:
                     stem = f"{track_artist} - {track_title}__{idx:04d}__{bpm_part}__{bars_part}__{start_mmss}-{end_mmss}__{slug_part}__{uid}"
                     
                     # Export with tail
-                    clip_path = export_clip_with_tail(
+                    clip_path, export_meta = export_clip_with_tail(
                         in_path, session_dir, stem, aa, bb,
                         st.session_state["export_format"],
-                        add_tail=True
+                        add_tail=True,
+                        add_fades=True
                     )
                     
                     # Save metadata
@@ -588,6 +648,7 @@ if run_btn:
                         "source": in_name,
                         "filename": clip_path.name,
                         "filename_stem": stem,
+                        "filename_template_version": "v2",
                         "track_artist": track_artist,
                         "track_title": track_title,
                         "track_id": track_id,
@@ -597,6 +658,17 @@ if run_btn:
                         "start_sec": aa,
                         "end_sec": bb,
                         "dur_sec": dur,
+                        "core_start_sec": export_meta["core_start_sec"],
+                        "core_end_sec": export_meta["core_end_sec"],
+                        "core_dur_sec": export_meta["core_dur_sec"],
+                        "export_start_sec": export_meta["export_start_sec"],
+                        "export_end_sec": export_meta["export_end_sec"],
+                        "export_dur_sec": export_meta["export_dur_sec"],
+                        "pre_roll_ms": export_meta["pre_roll_ms"],
+                        "fade_in_ms": export_meta["fade_in_ms"],
+                        "fade_out_ms": export_meta["fade_out_ms"],
+                        "tail_sec": export_meta["tail_sec"],
+                        "zero_cross_applied": export_meta["zero_cross_applied"],
                         "bpm_global": global_bpm,
                         "bpm_global_confidence": round(global_confidence, 2),
                         "bpm_clip": bpm_clip,
@@ -605,6 +677,7 @@ if run_btn:
                         "bpm_used_source": bpm_used_source,
                         "bars_estimated": raw_bars_estimate,
                         "bars_used": bars_used,
+                        "bars_used_source": "refined_grid" if refined_ok else "estimated",
                         "refined": bool(refined_ok),
                         "refined_reason": refined_reason,
                         "tags": ", ".join(sorted(tags)),
@@ -668,11 +741,12 @@ if run_btn:
                     
                     stem = f"{track_artist} - {track_title}__{idx:04d}__{start_mmss}-{end_mmss}__{slug_part}__{uid}"
                     
-                    # Export without tail for broadcast
-                    clip_path = export_clip_with_tail(
+                    # Export without tail for broadcast (and without fades)
+                    clip_path, export_meta = export_clip_with_tail(
                         in_path, session_dir, stem, a, b,
                         st.session_state["export_format"],
-                        add_tail=False
+                        add_tail=False,
+                        add_fades=False
                     )
                     
                     # Save metadata
@@ -692,6 +766,7 @@ if run_btn:
                         "source": in_name,
                         "filename": clip_path.name,
                         "filename_stem": stem,
+                        "filename_template_version": "v2",
                         "track_artist": track_artist,
                         "track_title": track_title,
                         "track_id": track_id,
@@ -701,6 +776,17 @@ if run_btn:
                         "start_sec": a,
                         "end_sec": b,
                         "dur_sec": dur,
+                        "core_start_sec": export_meta["core_start_sec"],
+                        "core_end_sec": export_meta["core_end_sec"],
+                        "core_dur_sec": export_meta["core_dur_sec"],
+                        "export_start_sec": export_meta["export_start_sec"],
+                        "export_end_sec": export_meta["export_end_sec"],
+                        "export_dur_sec": export_meta["export_dur_sec"],
+                        "pre_roll_ms": export_meta["pre_roll_ms"],
+                        "fade_in_ms": export_meta["fade_in_ms"],
+                        "fade_out_ms": export_meta["fade_out_ms"],
+                        "tail_sec": export_meta["tail_sec"],
+                        "zero_cross_applied": export_meta["zero_cross_applied"],
                         "bpm_global": 0,
                         "bpm_global_confidence": 0.0,
                         "bpm_clip": 0,
@@ -709,6 +795,7 @@ if run_btn:
                         "bpm_used_source": "unknown",
                         "bars_estimated": 0,
                         "bars_used": None,
+                        "bars_used_source": "unknown",
                         "refined": False,
                         "refined_reason": "",
                         "tags": ", ".join(tags),

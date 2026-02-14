@@ -1,16 +1,20 @@
 from pathlib import Path
 import yt_dlp
 import logging
+import shutil
+import subprocess
 from datetime import datetime
 from typing import Tuple, Optional, Dict
 
 
 class DownloadError(Exception):
     """Custom exception for download failures."""
-    def __init__(self, message, log_file=None, last_error=None):
+    def __init__(self, message, log_file=None, last_error=None, url=None, hint=None):
         super().__init__(message)
         self.log_file = log_file
         self.last_error = last_error
+        self.url = url
+        self.hint = hint
 
 
 class YTDLPLogger:
@@ -44,6 +48,19 @@ class YTDLPLogger:
             self.log_file.close()
 
 
+def check_js_runtime() -> Optional[str]:
+    """
+    Check if a JavaScript runtime is available.
+    
+    Returns:
+        Path to node executable if found, None otherwise
+    """
+    node_path = shutil.which("node")
+    if node_path:
+        return node_path
+    return None
+
+
 def download_audio(url, out_dir) -> Tuple[Path, Dict]:
     """
     Download audio from URL with fallback strategies, error logging, and verification.
@@ -67,6 +84,14 @@ def download_audio(url, out_dir) -> Tuple[Path, Dict]:
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     log_file = out_dir / f"download_log_{timestamp}.txt"
     logger = YTDLPLogger(log_file)
+    
+    # Check for JS runtime
+    js_runtime = check_js_runtime()
+    if js_runtime:
+        logger.info(f"JavaScript runtime detected: {js_runtime}")
+    else:
+        logger.warning("No JavaScript runtime found. Some videos may fail to download.")
+        logger.warning("Consider installing Node.js for better compatibility.")
     
     # Format strategies to try in order
     format_strategies = [
@@ -97,6 +122,17 @@ def download_audio(url, out_dir) -> Tuple[Path, Dict]:
                     "preferredquality": "192",
                 }],
             }
+            
+            # Add JS runtime if available
+            if js_runtime:
+                ydl_opts["extractor_args"] = {
+                    "youtube": {
+                        "player_client": ["android", "web"]
+                    }
+                }
+            
+            # Try extractor fallback strategies
+            logger.info(f"Extractor strategy: player_client=['android', 'web']" if js_runtime else "Extractor strategy: default")
             
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=True)
@@ -156,8 +192,28 @@ def download_audio(url, out_dir) -> Tuple[Path, Dict]:
     logger.error("")
     logger.error("TROUBLESHOOTING:")
     logger.error("1. Update yt-dlp: pip install --upgrade yt-dlp")
-    logger.error("2. Check if URL is accessible in your browser")
-    logger.error("3. Try using cookies file if video requires login")
+    
+    # Generate helpful hints based on error
+    hint = ""
+    if not js_runtime:
+        logger.error("2. Install Node.js for JavaScript runtime support")
+        hint = "Install Node.js (https://nodejs.org/) for better video extraction compatibility"
+    
+    if "Video unavailable" in str(last_error):
+        logger.error("3. Video may be geo-blocked or require login")
+        hint += " | Video may be geo-blocked or age-restricted"
+    
+    if "Sign in" in str(last_error) or "login" in str(last_error).lower():
+        logger.error("4. Try using cookies file for authenticated content")
+        hint += " | Video may require authentication - consider using cookies"
+    
+    logger.error("5. Check if URL is accessible in your browser")
     logger.close()
     
-    raise DownloadError(error_msg, log_file=str(log_file), last_error=last_error)
+    raise DownloadError(
+        error_msg, 
+        log_file=str(log_file), 
+        last_error=last_error,
+        url=url,
+        hint=hint if hint else "Check the log file for details"
+    )
