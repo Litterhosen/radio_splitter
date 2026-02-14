@@ -27,7 +27,7 @@ from tagging import auto_tags
 from jingle_finder import jingle_score
 from hook_finder import ffmpeg_to_wav16k_mono, find_hooks
 from beat_refine import refine_best_1_or_2_bars
-from utils import ensure_dir, hhmmss_ms, safe_slug, safe_dirname, clip_uid, estimate_bars_from_duration
+from utils import ensure_dir, hhmmss_ms, safe_slug, safe_dirname, clip_uid, estimate_bars_from_duration, snap_bars_to_valid
 
 # ----------------------------
 # Constants and Config
@@ -432,6 +432,7 @@ if run_btn:
                         "bpm": float(h.bpm),
                         "bpm_confidence": float(h.bpm_confidence),
                         "bpm_source": h.bpm_source,
+                        "bpm_clip_confidence": float(h.bpm_clip_confidence),
                     })
                 
                 # Apply minimum duration filter
@@ -463,24 +464,45 @@ if run_btn:
                         aa, bb = a, b
                         dur = max(0.0, bb - aa)
                         refined_ok = False
-                        rreason = "fallback_to_original"
+                        rreason = "too_short"
                     
-                    # Determine final BPM, bars, confidence, and source
+                    # Get preference for bar snapping
+                    prefer_bars = int(st.session_state.get("prefer_bars", 2))
+                    
+                    # Determine BPM and bars with proper tracking
+                    bpm_clip = int(cand.get("bpm", global_bpm))
+                    bpm_clip_confidence = cand.get("bpm_clip_confidence", 0.0)
+                    
                     if refined_ok:
-                        final_bpm = bpm_refined
-                        final_bars = bars
+                        # Refined: use beat-grid aligned values
+                        bpm_used = bpm_refined
+                        bpm_used_source = "refined_grid"
+                        bars_estimated_raw = bars_est
+                        bars_used = bars  # Already snapped by refine
                         final_bpm_conf = bpm_conf
-                        final_bpm_source = "refined_grid"
-                        bars_source = "refined_grid"
                         refined_reason = ""
                     else:
-                        # Use segment BPM estimate
-                        final_bpm = int(cand.get("bpm", global_bpm))
-                        final_bars = bars_est if bars_est > 0 else estimate_bars_from_duration(dur, final_bpm, 4)
-                        final_bpm_conf = cand.get("bpm_confidence", global_confidence)
-                        final_bpm_source = cand.get("bpm_source", "track_global")
-                        bars_source = "estimated"
-                        refined_reason = rreason
+                        # Not refined: use estimates with snapping
+                        # Calculate raw bars estimate
+                        if bars_est > 0:
+                            bars_estimated_raw = bars_est
+                        else:
+                            bars_estimated_raw = estimate_bars_from_duration(dur, bpm_clip, 4)
+                        
+                        # Snap bars to valid values
+                        bars_used = snap_bars_to_valid(bars_estimated_raw, prefer_bars, tolerance=0.25)
+                        
+                        # Determine BPM to use: prefer global if high confidence
+                        if cand.get("bpm_source") == "track_global":
+                            bpm_used = bpm_clip  # Already normalized to global
+                            bpm_used_source = "global_snapped"
+                            final_bpm_conf = cand.get("bpm_confidence", global_confidence)
+                        else:
+                            bpm_used = bpm_clip
+                            bpm_used_source = "segment_estimate"
+                            final_bpm_conf = bpm_clip_confidence
+                        
+                        refined_reason = rreason if rreason else "disabled"
                     
                     # Generate UID
                     uid = clip_uid(in_name, aa, bb, idx)
@@ -488,21 +510,18 @@ if run_btn:
                     # Build filename with BPM/bars info
                     base = f"{idx:04d}_{hhmmss_ms(aa)}_to_{hhmmss_ms(bb)}"
                     
-                    # Add BPM and bars info with confidence markers
-                    bpm_suffix = ""
-                    bars_suffix = ""
-                    
+                    # Add BPM and bars info using bpm_used and bars_used
                     if refined_ok:
                         # Clean refined result
-                        bpm_part = f"bpm{final_bpm}"
-                        bars_part = f"{final_bars}bar"
+                        bpm_part = f"bpm{bpm_used}"
+                        bars_part = f"{bars_used}bar"
                     else:
                         # Estimated with confidence markers
                         if final_bpm_conf < 0.4:
-                            bpm_part = f"bpm{final_bpm}_low"
+                            bpm_part = f"bpm{bpm_used}_low"
                         else:
-                            bpm_part = f"bpm{final_bpm}_est"
-                        bars_part = f"{final_bars}bar_est"
+                            bpm_part = f"bpm{bpm_used}_est"
+                        bars_part = f"{bars_used}bar_est"
                     
                     # Transcribe
                     wav_for_whisper = session_dir / f"{base}__whisper.wav"
@@ -510,13 +529,16 @@ if run_btn:
                     tjson = transcribe_wav(st.session_state.model, wav_for_whisper, language=lang)
                     text = (tjson.get("text") or "").strip()
                     
-                    # Generate slug
+                    # Generate slug (max 24 chars, use __noslug if empty)
                     slug = ""
                     if st.session_state["use_slug"] and text:
-                        slug = safe_slug(" ".join(text.split()[:int(st.session_state["slug_words"])]))
+                        slug = safe_slug(" ".join(text.split()[:int(st.session_state["slug_words"])]), max_len=24)
                     
-                    # Complete filename: {idx}_{start}_to_{end}_{bpm_part}_{bars_part}__{slug}_{uid}_tail.ext
-                    stem = f"{base}_{bpm_part}_{bars_part}__{slug}_{uid}" if slug else f"{base}_{bpm_part}_{bars_part}_{uid}"
+                    # Complete filename: use __noslug if no slug
+                    if slug:
+                        stem = f"{base}_{bpm_part}_{bars_part}__{slug}_{uid}"
+                    else:
+                        stem = f"{base}_{bpm_part}_{bars_part}__noslug_{uid}"
                     
                     # Export with tail
                     clip_path = export_clip_with_tail(
@@ -536,8 +558,8 @@ if run_btn:
                     
                     # Tags and themes
                     tags = ["musik", "hook"]
-                    if final_bars is not None:
-                        tags.append(f"{final_bars}bar")
+                    if bars_used is not None:
+                        tags.append(f"{bars_used}bar")
                     if not refined_ok:
                         tags.append("unrefined")
                     if text:
@@ -552,13 +574,16 @@ if run_btn:
                         "start_sec": aa,
                         "end_sec": bb,
                         "dur_sec": dur,
-                        "bpm": final_bpm,
-                        "bars": final_bars,
-                        "bars_source": bars_source,
+                        "bpm_global": global_bpm,
+                        "bpm_global_confidence": round(global_confidence, 2),
+                        "bpm_clip": bpm_clip,
+                        "bpm_clip_confidence": round(bpm_clip_confidence, 2),
+                        "bpm_used": bpm_used,
+                        "bpm_used_source": bpm_used_source,
+                        "bars_estimated": bars_estimated_raw,
+                        "bars_used": bars_used,
                         "refined": bool(refined_ok),
                         "refined_reason": refined_reason,
-                        "bpm_confidence": round(final_bpm_conf, 2),
-                        "bpm_source": final_bpm_source,
                         "tags": ", ".join(sorted(tags)),
                         "themes": ", ".join(themes),
                         "hook_score": cand.get("hook_score", 0.0),
@@ -606,12 +631,13 @@ if run_btn:
                     t = transcribe_wav(st.session_state.model, wav_for_whisper, language=lang)
                     text = (t.get("text") or "").strip()
                     
-                    # Generate slug
+                    # Generate slug (max 24 chars, use __noslug if empty)
                     slug = ""
                     if st.session_state["use_slug"] and text:
-                        slug = safe_slug(" ".join(text.split()[:int(st.session_state["slug_words"])]))
+                        slug = safe_slug(" ".join(text.split()[:int(st.session_state["slug_words"])]), max_len=24)
                     
-                    stem = f"{base}__{slug}" if slug else base
+                    # Use __noslug if no slug
+                    stem = f"{base}__{slug}" if slug else f"{base}__noslug"
                     
                     # Export without tail for broadcast
                     clip_path = export_clip_with_tail(
@@ -641,13 +667,16 @@ if run_btn:
                         "start_sec": a,
                         "end_sec": b,
                         "dur_sec": dur,
-                        "bpm": 0,
-                        "bars": None,
-                        "bars_source": "unknown",
+                        "bpm_global": 0,
+                        "bpm_global_confidence": 0.0,
+                        "bpm_clip": 0,
+                        "bpm_clip_confidence": 0.0,
+                        "bpm_used": 0,
+                        "bpm_used_source": "unknown",
+                        "bars_estimated": 0,
+                        "bars_used": None,
                         "refined": False,
                         "refined_reason": "",
-                        "bpm_confidence": 0.0,
-                        "bpm_source": "unknown",
                         "tags": ", ".join(tags),
                         "themes": ", ".join(themes),
                         "jingle_score": score,
@@ -680,7 +709,7 @@ if run_btn:
                 }
                 
                 # BPM statistics
-                bpms = [r.get("bpm", 0) for r in results if r.get("bpm", 0) > 0]
+                bpms = [r.get("bpm_used", 0) for r in results if r.get("bpm_used", 0) > 0]
                 if bpms:
                     qa_report["bpm_min"] = min(bpms)
                     qa_report["bpm_max"] = max(bpms)
@@ -692,8 +721,8 @@ if run_btn:
                     {
                         "clip": r.get("clip"),
                         "score": round(r.get("hook_score", 0), 2),
-                        "bpm": r.get("bpm"),
-                        "bars": r.get("bars"),
+                        "bpm": r.get("bpm_used"),
+                        "bars": r.get("bars_used"),
                     }
                     for r in sorted_results[:10]
                 ]

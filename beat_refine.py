@@ -117,9 +117,8 @@ def refine_to_n_bars(
         )
     
     # Failed all cascades
-    reason = "low_confidence" if bpm_confidence < 0.4 else "not_enough_beats"
     return RefineResult(
-        False, 0, 0, bpm, 0, 0, reason,
+        False, 0, 0, bpm, 0, 0, "not_enough_beats_for_bars",
         bars_estimated=bars_estimated, bpm_confidence=bpm_confidence
     )
 

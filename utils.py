@@ -133,3 +133,27 @@ def estimate_bars_from_duration(dur_sec: float, bpm: float, beats_per_bar: int =
     total_beats = dur_sec * beats_per_second
     bars = max(1, int(round(total_beats / beats_per_bar)))
     return bars
+
+
+def snap_bars_to_valid(raw_bars: float, prefer_bars: int = 2, tolerance: float = 0.25) -> int:
+    """
+    Snap raw bars estimate to valid DAW-friendly values [1, 2, 4, 8, 16].
+    
+    Args:
+        raw_bars: Raw calculated bars (can be fractional)
+        prefer_bars: Preferred bar count (user preference)
+        tolerance: Tolerance for snapping to prefer_bars (fraction of prefer_bars)
+    
+    Returns:
+        Snapped bar count from [1, 2, 4, 8, 16]
+    """
+    valid_bars = [1, 2, 4, 8, 16]
+    
+    # If raw_bars is close to prefer_bars, use prefer_bars
+    if prefer_bars in valid_bars:
+        if abs(raw_bars - prefer_bars) <= (prefer_bars * tolerance):
+            return prefer_bars
+    
+    # Otherwise, find closest valid value
+    closest = min(valid_bars, key=lambda x: abs(x - raw_bars))
+    return closest

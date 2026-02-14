@@ -15,6 +15,7 @@ class HookWindow:
     bpm: float
     bpm_confidence: float = 0.0
     bpm_source: str = "segment_estimate"
+    bpm_clip_confidence: float = 0.0  # Per-segment confidence
 
 
 def ffmpeg_to_wav16k_mono(in_path, out_path):
@@ -32,11 +33,32 @@ def ffmpeg_to_wav16k_mono(in_path, out_path):
 
 
 def estimate_bpm(y, sr):
-    tempo, _ = librosa.beat.beat_track(y=y, sr=sr)
+    """
+    Estimate BPM from audio segment with confidence metric.
+    
+    Returns:
+        (bpm, confidence) where confidence is based on beat interval consistency (0.0-1.0)
+    """
+    tempo, beats = librosa.beat.beat_track(y=y, sr=sr)
+    
     # Handle numpy array return from newer librosa
     if hasattr(tempo, '__len__'):
         tempo = tempo[0] if len(tempo) > 0 else 120.0
-    return int(round(float(tempo)))
+    bpm = int(round(float(tempo)))
+    
+    # Calculate confidence from beat interval consistency
+    if len(beats) > 2:
+        beat_times = librosa.frames_to_time(beats, sr=sr)
+        intervals = np.diff(beat_times)
+        if len(intervals) > 0:
+            cv = np.std(intervals) / (np.mean(intervals) + 1e-6)
+            confidence = max(0.0, min(1.0, 1.0 - cv))
+        else:
+            confidence = 0.0
+    else:
+        confidence = 0.0
+    
+    return bpm, confidence
 
 
 def estimate_global_bpm(y, sr):
@@ -153,17 +175,25 @@ def find_hooks(
             loopability = 1.0 / (1.0 + stability)
 
             score = energy * 0.6 + loopability * 0.4
-            segment_bpm = estimate_bpm(seg, sr)
+            segment_bpm, segment_confidence = estimate_bpm(seg, sr)
             
             # Normalize segment BPM to global BPM
             normalized_bpm, bpm_source = normalize_bpm_to_prior(
                 segment_bpm, global_bpm, tolerance=0.15
             )
+            
+            # Determine final confidence based on source
+            if bpm_source == "track_global":
+                # Using global BPM, so use global confidence
+                final_confidence = global_confidence
+            else:
+                # Using segment estimate, so use segment confidence
+                final_confidence = segment_confidence
 
             windows.append(
                 HookWindow(
                     start, end, score, energy, loopability, stability, 
-                    normalized_bpm, global_confidence, bpm_source
+                    normalized_bpm, final_confidence, bpm_source, segment_confidence
                 )
             )
 
