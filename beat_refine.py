@@ -17,6 +17,39 @@ class RefineResult:
     bpm_confidence: float = 0.0
 
 
+def _normalize_window_to_audio_timebase(window_start: float, window_end: float, audio_duration: float):
+    """
+    Normalize requested window into the loaded audio's timebase.
+
+    Handles both:
+    1) full-track timebase (absolute seconds in full file), and
+    2) segment-relative files where callers may mistakenly pass absolute times
+       from the source track (window_start >> segment duration).
+    """
+    ws = max(0.0, float(window_start))
+    we = max(ws, float(window_end))
+
+    if audio_duration <= 0.0:
+        return 0.0, 0.0
+
+    # Normal case: values fit within this file's duration.
+    if ws < audio_duration and we <= audio_duration + 1e-6:
+        return ws, we
+
+    # Timebase mismatch heuristic:
+    # segment file duration ~= requested interval length, while absolute start
+    # lies beyond this file's own duration.
+    requested_len = max(0.0, we - ws)
+    if ws >= audio_duration and requested_len > 0.0:
+        if abs(requested_len - audio_duration) <= 0.35:
+            return 0.0, audio_duration
+
+    # Safe clamp fallback.
+    ws = min(ws, audio_duration)
+    we = min(max(we, ws), audio_duration)
+    return ws, we
+
+
 def refine_to_n_bars(
     wav_path,
     window_start,
@@ -27,7 +60,7 @@ def refine_to_n_bars(
 ):
     """
     Refine audio segment to exact N bars with beat grid alignment.
-    
+
     Args:
         wav_path: Path to audio file
         window_start: Start time in seconds
@@ -35,11 +68,14 @@ def refine_to_n_bars(
         beats_per_bar: Number of beats per bar (default 4)
         prefer_bars: Preferred number of bars (1, 2, 4, 8, 16)
         sr: Sample rate
-    
+
     Returns:
         RefineResult with ok, start, end, bpm, bars, score, reason, bars_estimated, bpm_confidence
     """
     y, sr = librosa.load(wav_path, sr=sr)
+    audio_duration = len(y) / float(sr)
+    window_start, window_end = _normalize_window_to_audio_timebase(window_start, window_end, audio_duration)
+
     y_segment = y[int(window_start * sr): int(window_end * sr)]
     duration = len(y_segment) / float(sr)
 
@@ -51,12 +87,12 @@ def refine_to_n_bars(
         )
 
     tempo, beats = librosa.beat.beat_track(y=y_segment, sr=sr)
-    
+
     # Handle numpy array return from newer librosa
     if hasattr(tempo, '__len__'):
         tempo = tempo[0] if len(tempo) > 0 else 120.0
     bpm = int(round(float(tempo)))
-    
+
     # Calculate BPM confidence from beat interval consistency
     if len(beats) > 2:
         beat_times = librosa.frames_to_time(beats, sr=sr)
@@ -96,27 +132,27 @@ def refine_to_n_bars(
         cascade = [2, 1]
     else:
         cascade = [1]
-    
+
     for bars in cascade:
         beats_needed = beats_per_bar * bars
-        
+
         # Fix off-by-one bug: need beats[beats_needed] to exist
         if len(beats) < beats_needed + 1:
             continue
-        
+
         start_frame = beats[0]
         end_frame = beats[beats_needed]
-        
+
         start = librosa.frames_to_time(start_frame, sr=sr)
         end = librosa.frames_to_time(end_frame, sr=sr)
-        
+
         score = float(bpm / 200.0)
-        
+
         return RefineResult(
             True, start, end, bpm, bars, score, "",
             bars_estimated=bars_estimated, bpm_confidence=bpm_confidence
         )
-    
+
     # Failed all cascades
     return RefineResult(
         False, 0, 0, bpm, 0, 0, "not_enough_beats_for_bars",
