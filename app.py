@@ -144,10 +144,19 @@ st.sidebar.slider("Slug words", 2, 12, key="slug_words")
 # Mode-specific settings
 if st.session_state["mode"] == "📻 Broadcast Hunter (Mix)":
     st.sidebar.subheader("📻 Broadcast Split")
-    st.sidebar.slider("Silence threshold (dB)", -60.0, -10.0, step=1.0, key="noise_db")
-    st.sidebar.slider("Min silence (sec)", 0.2, 2.0, step=0.1, key="min_silence_s")
-    st.sidebar.slider("Padding (sec)", 0.0, 1.0, step=0.05, key="pad_s")
-    st.sidebar.slider("Min segment (sec)", 0.5, 10.0, step=0.1, key="min_segment_s")
+    st.sidebar.selectbox(
+        "Split method",
+        ["VAD-first (recommended)", "Energy-first"],
+        key="broadcast_split_method",
+    )
+    st.sidebar.caption("Minimum segment is fixed at 1.5s")
+    st.sidebar.slider("Max segment (sec)", 10.0, 120.0, step=1.0, key="max_segment_s")
+    st.sidebar.slider("Merge gap (sec)", 0.1, 1.0, step=0.05, key="merge_gap_s")
+    st.sidebar.slider("Chunk size (sec)", 300.0, 900.0, step=60.0, key="broadcast_chunk_s")
+    with st.sidebar.expander("Silence fallback tuning", expanded=False):
+        st.slider("Silence threshold (dB)", -60.0, -10.0, step=1.0, key="noise_db")
+        st.slider("Min silence (sec)", 0.2, 2.0, step=0.1, key="min_silence_s")
+        st.slider("Padding (sec)", 0.0, 1.0, step=0.05, key="pad_s")
 else:
     st.sidebar.subheader("🎵 Hook Detection")
     st.sidebar.slider("Min hook length (sec)", 2.0, 30.0, step=0.5, key="hook_len_range_min")
@@ -305,6 +314,7 @@ if run_btn:
     
     with st.status("🚀 Starting processing...", expanded=True) as status:
         results = []
+        st.session_state["source_artifacts"] = []
         run_id = datetime.utcnow().strftime("%Y%m%d_%H%M%S") + "_" + uuid4().hex[:8]
         st.session_state["active_run_id"] = run_id
         lang = get_whisper_language()
@@ -569,6 +579,12 @@ if run_btn:
                         "txt": str(txt_path),
                         "json": str(json_path),
                         "text": text[:240] if text else "",
+                        "transcript_full_txt_path": "",
+                        "transcript_full_json_path": "",
+                        "language_detected": t.get("language"),
+                        "transcribe_model": st.session_state["model_size"],
+                        "split_method_used": "hook",
+                        "chunking_enabled": False,
                     })
                 
                 progress_bar.empty()
@@ -577,72 +593,76 @@ if run_btn:
             # Mode: Broadcast Hunter (Mix)
             # ----------------------------
             else:
-                st.write("📻 Analyzing silence...")
-                intervals = detect_non_silent_intervals(
-                    in_path,
-                    noise_db=st.session_state["noise_db"],
-                    min_silence_s=st.session_state["min_silence_s"],
-                    pad_s=st.session_state["pad_s"],
-                    min_segment_s=st.session_state["min_segment_s"],
+                from broadcast_splitter import detect_broadcast_segments
+
+                st.write("📻 Segmenting with VAD-first...")
+                intervals, split_method_used, chunking_enabled = detect_broadcast_segments(
+                    wav16,
+                    min_segment_sec=1.5,
+                    max_segment_sec=float(st.session_state["max_segment_s"]),
+                    merge_gap_sec=float(st.session_state["merge_gap_s"]),
+                    chunk_sec=float(st.session_state["broadcast_chunk_s"]),
+                    silence_noise_db=st.session_state["noise_db"],
+                    silence_min_s=st.session_state["min_silence_s"],
+                    silence_pad_s=st.session_state["pad_s"],
+                    prefer_method="vad" if st.session_state["broadcast_split_method"].startswith("VAD") else "energy",
                 )
-                
-                # Apply minimum segment filter
-                min_duration = st.session_state["min_segment_s"]
-                intervals = [(a, b) for a, b in intervals if (b - a) >= min_duration]
-                st.write(f"✂️ Found {len(intervals)} segments (after {min_duration}s filter)")
-                
+
+                st.write(f"✂️ Found {len(intervals)} segments via **{split_method_used}** (chunking={chunking_enabled})")
+
                 progress_bar = st.progress(0)
                 total_int = len(intervals)
-                
+                source_rows = []
+                full_transcript_segments = []
+                language_detected = None
+
                 for idx, (a, b) in enumerate(intervals, start=1):
-                    progress_bar.progress(idx / total_int)
-                    
+                    progress_bar.progress(idx / max(total_int, 1))
+
                     a, b = float(a), float(b)
                     dur = max(0.0, b - a)
-                    
-                    # Transcribe
+
                     temp_wav = session_dir / f"temp_{idx:04d}__whisper.wav"
                     cut_segment_to_wav(in_path, temp_wav, a, b)
                     t = transcribe_wav(st.session_state.model, temp_wav, language=lang)
                     text = (t.get("text") or "").strip()
-                    
-                    # Generate slug (max 24 chars, use __noslug if empty)
+                    if not language_detected and t.get("language"):
+                        language_detected = t.get("language")
+
+                    for seg in t.get("segments", []):
+                        full_transcript_segments.append({
+                            "start": float(a) + float(seg.get("start", 0.0)),
+                            "end": float(a) + float(seg.get("end", 0.0)),
+                            "text": (seg.get("text") or "").strip(),
+                        })
+
                     slug = ""
                     if st.session_state["use_slug"] and text:
                         slug = safe_slug(" ".join(text.split()[:int(st.session_state["slug_words"])]), max_len=MAX_SLUG_LENGTH)
-                    
-                    # Generate UID
+
                     uid = clip_uid(in_name, a, b, idx)
-                    
-                    # New filename template for broadcast (no BPM/bars)
                     start_mmss = mmss(a)
                     end_mmss = mmss(b)
                     slug_part = slug if slug else "noslug"
-                    
                     stem = f"{track_artist} - {track_title}__{idx:04d}__{start_mmss}-{end_mmss}__{slug_part}__{uid}"
-                    
-                    # Export without tail for broadcast (and without fades)
+
                     clip_path, export_meta = export_clip_with_tail(
                         in_path, session_dir, stem, a, b,
                         st.session_state["export_format"],
                         add_tail=False,
                         add_fades=False
                     )
-                    
-                    # Save metadata
+
                     txt_path = session_dir / f"{stem}.txt"
                     json_path = session_dir / f"{stem}.json"
                     txt_path.write_text(text + "\n", encoding="utf-8")
-                    json_path.write_text(
-                        json.dumps(t, ensure_ascii=False, indent=2),
-                        encoding="utf-8"
-                    )
-                    
+                    json_path.write_text(json.dumps(t, ensure_ascii=False, indent=2), encoding="utf-8")
+
                     tags = auto_tags(text)
                     score = float(jingle_score(text, dur))
                     themes = detect_themes(text)
-                    
-                    results.append({
+
+                    source_rows.append({
                         "source": in_name,
                         "filename": clip_path.name,
                         "filename_stem": stem,
@@ -685,9 +705,57 @@ if run_btn:
                         "txt": str(txt_path),
                         "json": str(json_path),
                         "text": text[:240] if text else "",
+                        "transcript_full_txt_path": "",
+                        "transcript_full_json_path": "",
+                        "language_detected": t.get("language"),
+                        "transcribe_model": st.session_state["model_size"],
+                        "split_method_used": "vad",
+                        "chunking_enabled": False,
                     })
-                
+
                 progress_bar.empty()
+
+                full_transcript_segments = sorted(full_transcript_segments, key=lambda x: x["start"])
+                transcript_txt_path = session_dir / "transcript_full.txt"
+                transcript_json_path = session_dir / "transcript_full.json"
+
+                transcript_lines = [
+                    f"[{hhmmss_ms(seg['start'])}] {seg['text']}" for seg in full_transcript_segments if seg.get("text")
+                ]
+                transcript_txt_path.write_text("\n".join(transcript_lines) + ("\n" if transcript_lines else ""), encoding="utf-8")
+                transcript_json_path.write_text(
+                    json.dumps({
+                        "source": in_name,
+                        "language_detected": language_detected,
+                        "transcribe_model": st.session_state["model_size"],
+                        "segments": full_transcript_segments,
+                    }, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+
+                source_artifact = {
+                    "source": in_name,
+                    "audio_path": str(in_path),
+                    "session_dir": str(session_dir),
+                    "transcript_full_txt_path": str(transcript_txt_path),
+                    "transcript_full_json_path": str(transcript_json_path),
+                    "language_detected": language_detected,
+                    "transcribe_model": st.session_state["model_size"],
+                    "split_method_used": split_method_used,
+                    "chunking_enabled": bool(chunking_enabled),
+                    "segments": full_transcript_segments,
+                }
+                st.session_state.setdefault("source_artifacts", []).append(source_artifact)
+
+                for row in source_rows:
+                    row["transcript_full_txt_path"] = str(transcript_txt_path)
+                    row["transcript_full_json_path"] = str(transcript_json_path)
+                    row["language_detected"] = language_detected
+                    row["transcribe_model"] = st.session_state["model_size"]
+                    row["split_method_used"] = split_method_used
+                    row["chunking_enabled"] = bool(chunking_enabled)
+
+                results.extend(source_rows)
         
         st.session_state.results = results
         
@@ -868,6 +936,92 @@ if "results" in st.session_state and st.session_state.results:
                     if p.exists():
                         st.audio(p.read_bytes())
     
+    # Full transcript browser + download (Broadcast mode)
+    if st.session_state.get("source_artifacts"):
+        st.divider()
+        st.subheader("🧾 Full Transcripts")
+
+        run_transcript_bundle = io.BytesIO()
+        with zipfile.ZipFile(run_transcript_bundle, "w", zipfile.ZIP_DEFLATED) as z_run:
+            for artifact in st.session_state.get("source_artifacts", []):
+                src_stem = Path(artifact["source"]).stem
+                for key in ["transcript_full_txt_path", "transcript_full_json_path"]:
+                    fp = Path(artifact.get(key, ""))
+                    if fp.exists():
+                        z_run.write(fp, arcname=f"{src_stem}/{fp.name}")
+        run_transcript_bundle.seek(0)
+        st.download_button(
+            "⬇️ Download full transcript bundle (run)",
+            data=run_transcript_bundle,
+            file_name="transcripts_full_run.zip",
+            mime="application/zip",
+            use_container_width=True,
+        )
+
+        for artifact in st.session_state.get("source_artifacts", []):
+            src = artifact["source"]
+            src_stem = Path(src).stem
+            with st.expander(f"📄 {src}", expanded=False):
+                c1, c2 = st.columns(2)
+                txt_path = Path(artifact["transcript_full_txt_path"])
+                json_path = Path(artifact["transcript_full_json_path"])
+                if txt_path.exists():
+                    with c1:
+                        st.download_button(
+                            f"⬇️ Download full transcript (.txt) — {src_stem}",
+                            data=txt_path.read_bytes(),
+                            file_name=f"{src_stem}_transcript_full.txt",
+                            mime="text/plain",
+                            key=f"dl_txt_{src_stem}",
+                        )
+                if json_path.exists():
+                    with c2:
+                        st.download_button(
+                            f"⬇️ Download full transcript (.json) — {src_stem}",
+                            data=json_path.read_bytes(),
+                            file_name=f"{src_stem}_transcript_full.json",
+                            mime="application/json",
+                            key=f"dl_json_{src_stem}",
+                        )
+
+                source_selected = selected[selected["source"] == src] if "source" in selected.columns else pd.DataFrame([])
+                src_zip = io.BytesIO()
+                with zipfile.ZipFile(src_zip, "w", zipfile.ZIP_DEFLATED) as z_src:
+                    if txt_path.exists():
+                        z_src.write(txt_path, arcname=f"{src_stem}/{txt_path.name}")
+                    if json_path.exists():
+                        z_src.write(json_path, arcname=f"{src_stem}/{json_path.name}")
+                    for _, row in source_selected.iterrows():
+                        for k in ["clip_path", "txt", "json", "transcript_full_txt_path", "transcript_full_json_path"]:
+                            fp = Path(row.get(k, ""))
+                            if fp.exists():
+                                z_src.write(fp, arcname=f"{src_stem}/{fp.name}")
+                src_zip.seek(0)
+                st.download_button(
+                    f"📦 Download per-source ZIP — {src_stem}",
+                    data=src_zip,
+                    file_name=f"{src_stem}_bundle.zip",
+                    mime="application/zip",
+                    key=f"dl_zip_{src_stem}",
+                )
+
+                q = st.text_input("Search transcript", key=f"search_{src_stem}")
+                segs = artifact.get("segments", [])
+                if q.strip():
+                    segs = [seg for seg in segs if q.lower() in (seg.get("text", "").lower())]
+
+                for seg_idx, seg in enumerate(segs[:200], start=1):
+                    ts = float(seg.get("start", 0.0))
+                    ttxt = seg.get("text", "")
+                    cols = st.columns([4, 1])
+                    cols[0].write(f"[{hhmmss_ms(ts)}] {ttxt}")
+                    if cols[1].button("▶️ Play from", key=f"play_{src_stem}_{seg_idx}"):
+                        st.session_state[f"play_from_{src_stem}"] = ts
+
+                if Path(artifact["audio_path"]).exists():
+                    play_from = int(st.session_state.get(f"play_from_{src_stem}", 0))
+                    st.audio(str(artifact["audio_path"]), start_time=play_from)
+
     # Export ZIP
     if st.button("📦 Export ZIP (Selected)", type="primary", use_container_width=True):
         zip_buf = io.BytesIO()
@@ -881,7 +1035,7 @@ if "results" in st.session_state and st.session_state.results:
             # Add files
             for _, r in selected.iterrows():
                 src_stem = Path(r["source"]).stem
-                for k in ["clip_path", "txt", "json"]:
+                for k in ["clip_path", "txt", "json", "transcript_full_txt_path", "transcript_full_json_path"]:
                     if k in r and r[k]:
                         fp = Path(r[k])
                         if fp.exists():

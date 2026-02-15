@@ -306,3 +306,55 @@ If smoke tests fail after following troubleshooting steps, please report with:
 2. Error messages or screenshots
 3. Log files (if available)
 4. Python/OS/FFmpeg versions
+
+---
+
+## Test 6: Long-file Broadcast Hunter (>= 30 minutes)
+
+**Purpose:** Validate robust VAD-first chunked segmentation and full transcript deliverables on long recordings.
+
+### Steps:
+
+1. Open mode: **📻 Broadcast Hunter (Mix)**.
+2. Set:
+   - Split method: **VAD-first (recommended)**
+   - Max segment: **45 sec**
+   - Merge gap: **0.35 sec**
+   - Chunk size: **600 sec**
+3. Upload a long file (podcast/radio mix) of **at least 30 minutes**.
+4. Click **Load Whisper Model** then **Process**.
+5. In results, open **🧾 Full Transcripts** and verify:
+   - per-source `.txt` and `.json` download buttons
+   - transcript search works
+   - `▶️ Play from` seeks near the chosen timestamp
+6. Export selected clips ZIP.
+
+### Expected Results:
+
+✅ Processing completes without crash/OOM on long file.
+
+✅ Segmentation reports method used (`vad`, `energy`, or `silence`) and chunking status.
+
+✅ `manifest_selected.csv` includes:
+- `transcript_full_txt_path`
+- `transcript_full_json_path`
+- `language_detected`
+- `transcribe_model`
+- `split_method_used`
+- `chunking_enabled`
+
+✅ Full transcript files are present both per-source and in run ZIP exports.
+
+### Sample output ZIP structure
+
+```text
+sample_machine_clips.zip
+├── manifest_selected.csv
+└── My_Source/
+    ├── transcript_full.txt
+    ├── transcript_full.json
+    ├── Artist - Title__0001__00-00-45__slug__abc123.mp3
+    ├── Artist - Title__0001__00-00-45__slug__abc123.txt
+    ├── Artist - Title__0001__00-00-45__slug__abc123.json
+    └── ...
+```
