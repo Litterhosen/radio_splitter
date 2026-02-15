@@ -31,6 +31,7 @@ from jingle_finder import jingle_score
 from hook_finder import ffmpeg_to_wav16k_mono, find_hooks
 from beat_refine import refine_best_1_or_2_bars
 from utils import ensure_dir, hhmmss_ms, mmss, safe_slug, safe_dirname, clip_uid, estimate_bars_from_duration, snap_bars_to_valid, extract_track_metadata
+from audio_detection import detect_audio_type, normalize_text_for_signature, extract_language_info
 
 # Import configuration and UI utilities
 from config import (
@@ -340,6 +341,12 @@ if run_btn:
             ffmpeg_to_wav16k_mono(in_path, wav16)
             st.write("✅ Conversion complete.")
             
+            # Auto-detect audio type
+            st.write("🔍 Detecting audio type...")
+            audio_detection = detect_audio_type(wav16, sr=16000, duration=30.0)
+            st.write(f"🎯 **Audio Type:** {audio_detection['audio_type_guess']} (confidence: {audio_detection['audio_type_confidence']:.2f})")
+            st.write(f"💡 **Recommended Mode:** {audio_detection['recommended_mode']}")
+            
             # ----------------------------
             # Mode: Song Hunter (Loops)
             # ----------------------------
@@ -463,6 +470,12 @@ if run_btn:
                     tjson = transcribe_wav(st.session_state.model, temp_wav, language=lang)
                     text = (tjson.get("text") or "").strip()
                     
+                    # Extract language info for this clip
+                    clip_lang_info = extract_language_info(tjson)
+                    
+                    # Generate text signature for grouping
+                    text_signature = normalize_text_for_signature(text, max_words=10)
+                    
                     # Generate slug (max 24 chars, use __noslug if empty)
                     slug = ""
                     if st.session_state["use_slug"] and text:
@@ -581,7 +594,15 @@ if run_btn:
                         "text": text[:240] if text else "",
                         "transcript_full_txt_path": "",
                         "transcript_full_json_path": "",
-                        "language_detected": t.get("language"),
+                        "language_detected": tjson.get("language"),
+                        "language_guess_file": audio_detection.get("audio_type_guess", "unknown"),
+                        "language_confidence_file": audio_detection.get("audio_type_confidence", 0.0),
+                        "language_guess_clip": clip_lang_info.get("language_guess", "unknown"),
+                        "language_confidence_clip": clip_lang_info.get("language_confidence", 0.0),
+                        "audio_type_guess": audio_detection.get("audio_type_guess", "unknown"),
+                        "audio_type_confidence": audio_detection.get("audio_type_confidence", 0.0),
+                        "recommended_mode": audio_detection.get("recommended_mode", ""),
+                        "clip_text_signature": text_signature,
                         "transcribe_model": st.session_state["model_size"],
                         "split_method_used": "hook",
                         "chunking_enabled": False,
@@ -628,6 +649,12 @@ if run_btn:
                     text = (t.get("text") or "").strip()
                     if not language_detected and t.get("language"):
                         language_detected = t.get("language")
+                    
+                    # Extract language info for this clip
+                    clip_lang_info = extract_language_info(t)
+                    
+                    # Generate text signature for grouping
+                    text_signature = normalize_text_for_signature(text, max_words=10)
 
                     for seg in t.get("segments", []):
                         full_transcript_segments.append({
@@ -708,6 +735,14 @@ if run_btn:
                         "transcript_full_txt_path": "",
                         "transcript_full_json_path": "",
                         "language_detected": t.get("language"),
+                        "language_guess_file": audio_detection.get("audio_type_guess", "unknown"),
+                        "language_confidence_file": audio_detection.get("audio_type_confidence", 0.0),
+                        "language_guess_clip": clip_lang_info.get("language_guess", "unknown"),
+                        "language_confidence_clip": clip_lang_info.get("language_confidence", 0.0),
+                        "audio_type_guess": audio_detection.get("audio_type_guess", "unknown"),
+                        "audio_type_confidence": audio_detection.get("audio_type_confidence", 0.0),
+                        "recommended_mode": audio_detection.get("recommended_mode", ""),
+                        "clip_text_signature": text_signature,
                         "transcribe_model": st.session_state["model_size"],
                         "split_method_used": "vad",
                         "chunking_enabled": False,
