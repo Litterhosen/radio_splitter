@@ -6,8 +6,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, List, Tuple, Dict
 
-import streamlit as st
-
 
 def ensure_dir(p: Path) -> Path:
     p = Path(p)
@@ -50,6 +48,7 @@ def find_ffmpeg() -> str:
     4) imageio-ffmpeg bundled binary
     """
     try:
+        import streamlit as st
         sp = st.secrets.get("FFMPEG_PATH", "")
         if sp:
             return str(sp)
