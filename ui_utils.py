@@ -120,15 +120,16 @@ def export_clip_with_tail(
     outp = session_dir / f"{stem}{suffix}.{ext}"
     
     # Use new export function with fades if enabled for Song Hunter
+    # Standard pre-roll, fade-in, and fade-out durations are specified in milliseconds
     if add_fades:
         export_meta = cut_segment_with_fades(
             in_path, 
             outp, 
             core_start=a, 
             core_end=b,
-            pre_roll_ms=25.0,
-            fade_in_ms=15.0,
-            fade_out_ms=15.0,
+            pre_roll_ms=25.0,  # Standard pre-roll duration in milliseconds
+            fade_in_ms=15.0,   # Standard fade-in duration in milliseconds
+            fade_out_ms=15.0,  # Standard fade-out duration in milliseconds
             tail_sec=tail_duration,
             apply_zero_crossing=True,
             bitrate="192k",

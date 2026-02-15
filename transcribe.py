@@ -18,7 +18,17 @@ class WhisperState:
 
 @st.cache_resource
 def load_model(model_size: str = "small", device: str = "cpu", compute_type: str = "int8") -> WhisperModel:
-    """Load Whisper model with caching to avoid reloading on every rerun"""
+    """
+    Load Whisper model with caching to avoid reloading on every rerun.
+    
+    Args:
+        model_size: Size of the Whisper model to load (default: "small")
+        device: Device to load model on (default: "cpu")
+        compute_type: Computation type for model inference (default: "int8")
+    
+    Returns:
+        WhisperModel: Loaded and cached Whisper model instance
+    """
     return WhisperModel(model_size, device=device, compute_type=compute_type)
 
 
