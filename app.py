@@ -406,6 +406,8 @@ with tab_link:
             
             # Show next steps in a structured way
             if hasattr(e, 'error_code') and e.error_code:
+                if e.error_code.value == "ERR_YT_UNAVAILABLE":
+                    st.info("ℹ️ Unified YouTube availability code: `ERR_YT_UNAVAILABLE` (unavailable/geo/login).")
                 from downloaders import classify_error, check_js_runtime
                 _, _, next_steps = classify_error(str(e.last_error) if e.last_error else "", check_js_runtime() is not None)
                 st.info("**Next Steps:**")

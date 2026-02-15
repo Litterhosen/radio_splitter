@@ -65,7 +65,7 @@ def test_refine_handles_absolute_times_against_segment_audio_timebase():
 def test_refine_does_not_snap_down_when_requested_bars_unavailable():
     sr = 22050
     y = np.zeros(sr * 16, dtype=np.float32)
-    # 60 BPM-ish fake beat frames, enough for 8 bars but not 16 bars
+    # Enough beats for 8 bars but intentionally not enough for requested 16 bars
     beats = np.arange(0, 33)  # 33 beats => max 8 bars (32 beats needed + start)
 
     with patch("beat_refine.librosa.load", return_value=(y, sr)), \

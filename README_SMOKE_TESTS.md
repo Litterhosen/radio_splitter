@@ -128,7 +128,7 @@ This document contains smoke test instructions to verify the application works c
 
 ✅ **Error classification code shown in UI:**
    - `ERR_JS_RUNTIME_MISSING`
-   - `ERR_YT_UNAVAILABLE` (video unavailable / geo blocked / login required)
+   - `ERR_YT_UNAVAILABLE` (video unavailable / geo blocked / login required; replaces older split codes)
    - `ERR_NETWORK`
 
 ✅ **If Node.js is unavailable on Streamlit Cloud, UI explains platform limitation and next action**

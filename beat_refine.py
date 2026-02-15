@@ -120,7 +120,7 @@ def refine_to_n_bars(
             bars_estimated=bars_estimated, bpm_confidence=bpm_confidence
         )
 
-    # Respect explicit user choice: do not silently snap down to fewer bars.
+    # Respect explicit user choice from Song Hunter: never silently snap 16→8/4/2/1.
     bars = max(1, int(prefer_bars))
     beats_needed = beats_per_bar * bars
 
