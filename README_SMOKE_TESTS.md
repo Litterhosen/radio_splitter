@@ -358,3 +358,98 @@ sample_machine_clips.zip
     ├── Artist - Title__0001__00-00-45__slug__abc123.json
     └── ...
 ```
+
+---
+
+## Test 7: Auto-Detection + Transcript Grouping Features
+
+**Purpose:** Verify new auto-detection, language detection, and transcript grouping features work correctly.
+
+### Steps:
+
+1. Process a file with **either mode** (Song Hunter or Broadcast Hunter)
+
+2. After processing completes, check the UI output for:
+   - **Audio Type Detection** message showing detected type and confidence
+   - **Recommended Mode** message
+
+3. Scroll down to **Results Browser** section
+
+4. Test grouping options:
+   - Set **Grouping** dropdown to **"Group by Phrase"**
+   - Verify clips are grouped by similar text signatures
+   - Check that group count is shown
+   - Expand a group to verify clips inside are displayed correctly
+   
+5. Try other grouping modes:
+   - **Group by Tag/Theme**: Should group clips with similar tags
+   - **Group by Language**: Should group clips by detected language (da/en/unknown)
+   - **None**: Standard paginated view
+
+6. Verify clip preview cards show:
+   - Transcript snippet (first ~150 chars)
+   - Language label with flag emoji (🇩🇰 DA, 🇬🇧 EN, or 🌐)
+   - Tags and themes
+   - "Copy text" button for each clip with transcript
+
+### Expected Results:
+
+✅ **Audio detection appears after conversion:**
+```
+🔍 Detecting audio type...
+🎯 Audio Type: music (confidence: 0.75)
+💡 Recommended Mode: Song Hunter | Broadcast Hunter
+```
+
+✅ **Grouping dropdown is visible with 4 options**
+
+✅ **Group by Phrase works:**
+- Clips with same or similar text are grouped together
+- Groups show count: "📋 \"text snippet...\" (3 clips)"
+- Groups are collapsible
+
+✅ **Group by Language works:**
+- Groups labeled with flags: "🇩🇰 Danish", "🇬🇧 English", etc.
+- Clips correctly grouped by detected language
+
+✅ **Clip preview cards show enhanced metadata:**
+- Language label with appropriate emoji
+- Transcript snippet (truncated if long)
+- Copy text button appears for clips with transcripts
+- Tags and themes displayed separately
+
+✅ **Audio playback works in all grouping modes**
+
+### Verify in manifest CSV:
+
+After downloading and opening `manifest_selected.csv`, check for new columns:
+
+- `audio_type_guess` (music|speech|mixed|jingle_ad|unknown)
+- `audio_type_confidence` (0.0 to 1.0)
+- `recommended_mode` (mode recommendation string)
+- `language_guess_file` (file-level language detection)
+- `language_confidence_file` (0.0 to 1.0)
+- `language_guess_clip` (clip-level language, e.g., "da", "en", "unknown")
+- `language_confidence_clip` (0.0 to 1.0)
+- `clip_text_signature` (normalized text for grouping)
+
+### Sample manifest row (new fields only):
+
+```csv
+audio_type_guess,audio_type_confidence,recommended_mode,language_guess_file,language_confidence_file,language_guess_clip,language_confidence_clip,clip_text_signature
+music,0.82,Song Hunter | Broadcast Hunter,music,0.82,da,0.8,hold on jeg kommer
+```
+
+---
+
+## Screenshot Checklist
+
+To demonstrate the new features are working, capture screenshots showing:
+
+1. **Audio detection output** - The detection message with type and confidence
+2. **Grouping dropdown** - The UI showing grouping options
+3. **Grouped view** - At least one grouping mode with collapsed/expanded groups
+4. **Enhanced clip card** - Showing language label, snippet, and copy button
+5. **Manifest with new fields** - CSV opened in Excel/editor showing new columns
+
+---
