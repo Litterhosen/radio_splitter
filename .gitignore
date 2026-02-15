@@ -2,6 +2,7 @@
 .venv1/
 __pycache__/
 output/
+crash_test/results/
 .DS_Store
 *.log
 *.zip
