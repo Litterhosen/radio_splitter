@@ -1,8 +1,8 @@
 # CRITICAL: st.set_page_config MUST be the VERY FIRST Streamlit call
 import streamlit as st
 
-# Version number
-VERSION = "1.1.9"
+# Import version first for page config
+from config import VERSION
 
 st.set_page_config(page_title=f"The Sample Machine v{VERSION}", layout="wide")
 
@@ -10,7 +10,7 @@ import io
 import json
 import zipfile
 from pathlib import Path
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Optional
 from datetime import datetime
 from uuid import uuid4
 
@@ -32,223 +32,46 @@ from hook_finder import ffmpeg_to_wav16k_mono, find_hooks
 from beat_refine import refine_best_1_or_2_bars
 from utils import ensure_dir, hhmmss_ms, mmss, safe_slug, safe_dirname, clip_uid, estimate_bars_from_duration, snap_bars_to_valid, extract_track_metadata
 
+# Import configuration and UI utilities
+from config import (
+    OUTPUT_ROOT,
+    OVERLAP_THRESHOLD,
+    MIN_DURATION_SECONDS,
+    MIN_CLIP_DURATION_SECONDS,
+    DECAY_TAIL_DURATION,
+    MAX_SLUG_LENGTH,
+    MAX_FILENAME_LENGTH,
+    MAX_STEM_LENGTH,
+    MODE_OPTIONS,
+    THEMES,
+    DEFAULTS,
+)
+from ui_utils import (
+    bars_ui_to_int,
+    get_whisper_language,
+    detect_themes,
+    overlap_ratio,
+    anti_overlap_keep_best,
+    filter_by_duration,
+    save_input_to_session_dir,
+    export_clip_with_tail,
+)
+
 # ----------------------------
-# Constants and Config
+# Initialize Output Directory
 # ----------------------------
-OUTPUT_ROOT = Path("output")
 ensure_dir(OUTPUT_ROOT)
 
-# Anti-overlap and filter thresholds
-OVERLAP_THRESHOLD = 0.30  # 30% overlap threshold for duplicate detection
-MIN_DURATION_SECONDS = 4.0  # Minimum clip duration for initial hook detection
-MIN_CLIP_DURATION_SECONDS = 2.0  # Minimum duration after refinement (shorter clips rejected)
-DECAY_TAIL_DURATION = 0.75  # Extra audio tail for loops (seconds)
-MAX_SLUG_LENGTH = 24  # Maximum characters for slug in filename
-
-# Filename length constraints
-MAX_FILENAME_LENGTH = 140  # Maximum total filename length (OS compatibility)
-MAX_STEM_LENGTH = 130  # Reserve 10 chars for extension (_tail.mp3)
-
-MODE_OPTIONS = [
-    "🎵 Song Hunter (Loops)",
-    "📻 Broadcast Hunter (Mix)",
-]
-
-# Bilingual theme keywords (DA + EN)
-THEMES = {
-    "THEME:TIME": ["tid", "evighed", "nu", "time", "eternity", "now"],
-    "THEME:MEMORY": ["huske", "glemme", "remember", "forget", "back"],
-    "THEME:DREAM": ["drøm", "natten", "dream", "night", "sleep"],
-    "THEME:EXISTENTIAL": ["livet", "verden", "cirkel", "life", "world", "circle"],
-    "THEME:META": ["radio", "musik", "stemme", "lyd", "music", "voice", "sound"],
-}
-
-DEFAULTS = {
-    "mode": MODE_OPTIONS[0],
-    "model_size": "small",
-    "whisper_language_ui": "Auto",
-    "device": "cpu",
-    "compute_type": "int8",
-    "noise_db": -28.0,
-    "min_silence_s": 0.4,
-    "pad_s": 0.15,
-    "min_segment_s": 1.2,
-    "fixed_len": 8.0,
-    "hook_len_range_min": 4.0,
-    "hook_len_range_max": 15.0,
-    "prefer_len": 8.0,
-    "hook_hop": 1.0,
-    "hook_topn": 12,
-    "hook_gap": 2.0,
-    "chorus_len_range_min": 30.0,
-    "chorus_len_range_max": 45.0,
-    "chorus_hop": 2.0,
-    "chorus_topn": 4,
-    "chorus_gap": 8.0,
-    "loops_per_chorus": 10,
-    "beat_refine": True,
-    "beats_per_bar": 4,
-    "prefer_bars": 2,
-    "prefer_bars_ui": "2 bars",
-    "try_both_bars": True,
-    "use_slug": True,
-    "slug_words": 6,
-    "export_format": "mp3 (192k)",
-    "downloaded_files": [],
-}
-
+# ----------------------------
+# Initialize Session State
+# ----------------------------
 for k, v in DEFAULTS.items():
     st.session_state.setdefault(k, v)
 
 # ----------------------------
-# Helper Functions
+# Helper Function for Beat Refinement
 # ----------------------------
-def bars_ui_to_int(bars_ui: str) -> int:
-    """Convert UI bar string to integer value"""
-    bars_mapping = {
-        "1 bar": 1, 
-        "2 bars": 2, 
-        "4 bars": 4, 
-        "8 bars": 8, 
-        "16 bars": 16
-    }
-    return bars_mapping.get(bars_ui, 2)  # Default to 2 if unknown
-
-
-def get_whisper_language():
-    """Convert UI language to whisper language code"""
-    mapping = {"Auto": None, "Dansk": "da", "English": "en"}
-    return mapping.get(st.session_state["whisper_language_ui"], None)
-
-
-def detect_themes(text: str) -> List[str]:
-    """Scan transcript for bilingual theme keywords"""
-    text_lower = (text or "").lower()
-    found = []
-    for theme, keywords in THEMES.items():
-        if any(kw in text_lower for kw in keywords):
-            found.append(theme)
-    return found
-
-
-def overlap_ratio(a: tuple, b: tuple) -> float:
-    """Calculate overlap ratio between two intervals"""
-    left = max(a[0], b[0])
-    right = min(a[1], b[1])
-    if right <= left:
-        return 0.0
-    intersection = right - left
-    shortest = min(a[1] - a[0], b[1] - b[0])
-    if shortest <= 0:
-        return 0.0
-    return intersection / shortest
-
-
-def anti_overlap_keep_best(candidates: List[Dict]) -> List[Dict]:
-    """Remove overlapping candidates, keeping the highest scoring ones"""
-    kept = []
-    for item in sorted(candidates, key=lambda x: float(x["score"]), reverse=True):
-        rng = (float(item["start"]), float(item["end"]))
-        if any(overlap_ratio(rng, (float(k["start"]), float(k["end"]))) > OVERLAP_THRESHOLD for k in kept):
-            continue
-        kept.append(item)
-    return kept
-
-
-def filter_by_duration(candidates: List[Dict], min_duration: float = MIN_DURATION_SECONDS) -> List[Dict]:
-    """Filter out candidates shorter than min_duration seconds"""
-    return [c for c in candidates if (float(c["end"]) - float(c["start"])) >= min_duration]
-
-
-def save_input_to_session_dir(src_type: str, name_or_path: str, maybe_bytes, youtube_info=None, run_id: str = "run"):
-    """Save uploaded or downloaded file to a run-scoped session directory"""
-    if src_type == "upload":
-        in_name = name_or_path
-        # Use safe_dirname for session directory
-        safe_name = safe_dirname(Path(in_name).stem)
-        session_dir = ensure_dir(OUTPUT_ROOT / f"{safe_name}__{run_id}")
-        in_path = session_dir / in_name
-        in_path.write_bytes(maybe_bytes)
-        return in_path, session_dir, in_name, youtube_info or {}
-
-    p = Path(name_or_path)
-    in_name = p.name
-    # Use safe_dirname for session directory
-    safe_name = safe_dirname(p.stem)
-    session_dir = ensure_dir(OUTPUT_ROOT / f"{safe_name}__{run_id}")
-    local_in = session_dir / in_name
-    if not local_in.exists():
-        local_in.write_bytes(p.read_bytes())
-    return local_in, session_dir, in_name, youtube_info or {}
-
-
-def export_clip_with_tail(
-    in_path: Path, 
-    session_dir: Path, 
-    stem: str, 
-    a: float, 
-    b: float, 
-    want_format: str,
-    add_tail: bool = True,
-    add_fades: bool = True
-) -> Tuple[Path, dict]:
-    """
-    Export clip with optional decay tail and fades.
-    
-    Returns:
-        Tuple of (clip_path, export_metadata_dict)
-    """
-    tail_duration = DECAY_TAIL_DURATION if add_tail else 0.0
-    
-    # Determine file extension
-    is_wav = want_format.startswith("wav")
-    ext = "wav" if is_wav else "mp3"
-    suffix = "_tail" if add_tail else ""
-    outp = session_dir / f"{stem}{suffix}.{ext}"
-    
-    # Use new export function with fades if enabled for Song Hunter
-    if add_fades:
-        export_meta = cut_segment_with_fades(
-            in_path, 
-            outp, 
-            core_start=a, 
-            core_end=b,
-            pre_roll_ms=25.0,
-            fade_in_ms=15.0,
-            fade_out_ms=15.0,
-            tail_sec=tail_duration,
-            apply_zero_crossing=True,
-            bitrate="192k",
-            is_wav=is_wav
-        )
-        return outp, export_meta
-    else:
-        # Legacy export without fades for broadcast mode
-        b_with_tail = b + tail_duration
-        
-        if is_wav:
-            cut_segment_to_wav(in_path, outp, a, b_with_tail)
-        else:
-            cut_segment_to_mp3(in_path, outp, a, b_with_tail, bitrate="192k")
-        
-        # Return simple metadata for backward compatibility
-        export_meta = {
-            "core_start_sec": float(a),
-            "core_end_sec": float(b),
-            "core_dur_sec": float(b - a),
-            "export_start_sec": float(a),
-            "export_end_sec": float(b_with_tail),
-            "export_dur_sec": float(b_with_tail - a),
-            "pre_roll_ms": 0.0,
-            "fade_in_ms": 0.0,
-            "fade_out_ms": 0.0,
-            "tail_sec": float(tail_duration),
-            "zero_cross_applied": False,
-        }
-        return outp, export_meta
-
-
-def maybe_refine_barloop(wav_for_analysis: Path, a: float, b: float):
+def maybe_refine_barloop(wav_for_analysis: Path, a: float, b: float) -> Tuple[float, float, int, Optional[int], float, bool, str, int, float]:
     """Refine loop to beat grid if enabled"""
     if not st.session_state["beat_refine"]:
         dur = b - a
