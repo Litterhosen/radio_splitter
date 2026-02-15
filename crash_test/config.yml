@@ -1,0 +1,11 @@
+# Crash Test Configuration
+# Users can provide real audio files here, or leave blank to use synthetic audio
+
+# Path to a real MP3/WAV song (3-5 min ideal)
+sample_song_path: ""
+
+# Path to a 30+ min broadcast/podcast file
+long_broadcast_path: ""
+
+# Optional YouTube URL to test download (leave blank to skip live test)
+youtube_test_url: ""
