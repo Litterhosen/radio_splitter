@@ -11,6 +11,8 @@ import json
 import zipfile
 from pathlib import Path
 from typing import List, Dict, Any, Tuple
+from datetime import datetime
+from uuid import uuid4
 
 import pandas as pd
 
@@ -158,13 +160,13 @@ def filter_by_duration(candidates: List[Dict], min_duration: float = MIN_DURATIO
     return [c for c in candidates if (float(c["end"]) - float(c["start"])) >= min_duration]
 
 
-def save_input_to_session_dir(src_type: str, name_or_path: str, maybe_bytes, youtube_info=None):
-    """Save uploaded or downloaded file to session directory"""
+def save_input_to_session_dir(src_type: str, name_or_path: str, maybe_bytes, youtube_info=None, run_id: str = "run"):
+    """Save uploaded or downloaded file to a run-scoped session directory"""
     if src_type == "upload":
         in_name = name_or_path
         # Use safe_dirname for session directory
         safe_name = safe_dirname(Path(in_name).stem)
-        session_dir = ensure_dir(OUTPUT_ROOT / safe_name)
+        session_dir = ensure_dir(OUTPUT_ROOT / f"{safe_name}__{run_id}")
         in_path = session_dir / in_name
         in_path.write_bytes(maybe_bytes)
         return in_path, session_dir, in_name, youtube_info or {}
@@ -173,7 +175,7 @@ def save_input_to_session_dir(src_type: str, name_or_path: str, maybe_bytes, you
     in_name = p.name
     # Use safe_dirname for session directory
     safe_name = safe_dirname(p.stem)
-    session_dir = ensure_dir(OUTPUT_ROOT / safe_name)
+    session_dir = ensure_dir(OUTPUT_ROOT / f"{safe_name}__{run_id}")
     local_in = session_dir / in_name
     if not local_in.exists():
         local_in.write_bytes(p.read_bytes())
@@ -398,6 +400,9 @@ with tab_link:
             # Show hint
             if e.hint:
                 st.warning(f"💡 **Diagnosis:** {e.hint}")
+
+            if hasattr(e, 'error_code') and e.error_code and e.error_code.value == "ERR_JS_RUNTIME_MISSING":
+                st.info("ℹ️ **Streamlit Cloud note:** some YouTube downloads require Node.js; Streamlit Cloud runtimes may not provide it.")
             
             # Show next steps in a structured way
             if hasattr(e, 'error_code') and e.error_code:
@@ -473,6 +478,8 @@ if run_btn:
     
     with st.status("🚀 Starting processing...", expanded=True) as status:
         results = []
+        run_id = datetime.utcnow().strftime("%Y%m%d_%H%M%S") + "_" + uuid4().hex[:8]
+        st.session_state["active_run_id"] = run_id
         lang = get_whisper_language()
         total_files = len(input_paths)
 
@@ -485,7 +492,7 @@ if run_btn:
             st.write(f"### File {idx_file+1}/{total_files}: {name_or_path}")
             
             # Step 1: Save and convert to analysis format
-            in_path, session_dir, in_name, yt_info = save_input_to_session_dir(src_type, name_or_path, maybe_bytes, youtube_info)
+            in_path, session_dir, in_name, yt_info = save_input_to_session_dir(src_type, name_or_path, maybe_bytes, youtube_info, run_id=run_id)
             
             # Extract track metadata (artist, title, track_id)
             track_artist, track_title, track_id = extract_track_metadata(in_path, yt_info)
@@ -962,40 +969,54 @@ if "results" in st.session_state and st.session_state.results:
     
     selected = edited[edited["pick"] == True].copy()
     st.write(f"**Selected:** {len(selected)} clips")
-    
-    # Sort by hook_score descending (if available)
+
+    # Preview controls: sort + show all/paginated
+    sort_options = []
     if "hook_score" in selected.columns:
-        selected = selected.sort_values("hook_score", ascending=False)
-    
-    # Preview section - show ALL clips with pagination
+        sort_options.append("hook_score")
+    if "energy" in selected.columns:
+        sort_options.append("energy")
+    sort_options = sort_options or ["clip"]
+
+    preview_sort = st.selectbox("Preview sort", sort_options, index=0, key="preview_sort")
+    if preview_sort in selected.columns:
+        selected = selected.sort_values(preview_sort, ascending=False, kind="stable")
+
+    show_all_preview = st.checkbox("Show all selected clips", value=False, key="preview_show_all")
+
+    # Preview section - show all clips or paginated clips
     clips_per_page = 20
     total_clips = len(selected)
     total_pages = (total_clips + clips_per_page - 1) // clips_per_page  # Ceiling division
-    
-    # Initialize page number in session state
-    if "preview_page" not in st.session_state:
-        st.session_state.preview_page = 0
-    
+
+    run_preview_key = f"preview_page__{st.session_state.get('active_run_id', 'default')}"
+    if run_preview_key not in st.session_state:
+        st.session_state[run_preview_key] = 0
+
     with st.expander(f"🎧 Preview Selected ({total_clips} clips)", expanded=True):
         if total_clips > 0:
-            # Pagination controls
-            if total_pages > 1:
-                col_prev, col_info, col_next = st.columns([1, 2, 1])
-                with col_prev:
-                    if st.button("⬅️ Previous", disabled=st.session_state.preview_page == 0):
-                        st.session_state.preview_page = max(0, st.session_state.preview_page - 1)
-                        st.rerun()
-                with col_info:
-                    st.write(f"Page {st.session_state.preview_page + 1} of {total_pages}")
-                with col_next:
-                    if st.button("Next ➡️", disabled=st.session_state.preview_page >= total_pages - 1):
-                        st.session_state.preview_page = min(total_pages - 1, st.session_state.preview_page + 1)
-                        st.rerun()
-            
-            # Calculate page slice
-            start_idx = st.session_state.preview_page * clips_per_page
-            end_idx = min(start_idx + clips_per_page, total_clips)
-            page_clips = selected.iloc[start_idx:end_idx]
+            if show_all_preview:
+                page_clips = selected
+                st.write(f"Showing all {total_clips} clips")
+            else:
+                # Pagination controls
+                if total_pages > 1:
+                    col_prev, col_info, col_next = st.columns([1, 2, 1])
+                    with col_prev:
+                        if st.button("⬅️ Previous", disabled=st.session_state[run_preview_key] == 0):
+                            st.session_state[run_preview_key] = max(0, st.session_state[run_preview_key] - 1)
+                            st.rerun()
+                    with col_info:
+                        st.write(f"Page {st.session_state[run_preview_key] + 1} of {total_pages}")
+                    with col_next:
+                        if st.button("Next ➡️", disabled=st.session_state[run_preview_key] >= total_pages - 1):
+                            st.session_state[run_preview_key] = min(total_pages - 1, st.session_state[run_preview_key] + 1)
+                            st.rerun()
+
+                # Calculate page slice
+                start_idx = st.session_state[run_preview_key] * clips_per_page
+                end_idx = min(start_idx + clips_per_page, total_clips)
+                page_clips = selected.iloc[start_idx:end_idx]
             
             # Display clips
             for idx, r in page_clips.iterrows():
