@@ -657,7 +657,7 @@ if run_btn:
                     # Enforce max length
                     if len(stem) > MAX_STEM_LENGTH:
                         # Truncate the slug part first, then title if needed
-                        excess = len(stem) - max_stem_len
+                        excess = len(stem) - MAX_STEM_LENGTH
                         if len(slug_part) > 10:
                             slug_part = slug_part[:max(4, len(slug_part) - excess)]
                             stem = f"{track_artist}-{track_title}__{idx:04d}__{bpm_part}__{bars_part}__{slug_part}__{uid}"
