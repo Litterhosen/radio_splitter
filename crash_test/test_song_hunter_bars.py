@@ -7,6 +7,10 @@ from pathlib import Path
 from hook_finder import find_hooks
 
 
+# Tolerance for duration matching (seconds)
+DURATION_TOLERANCE_SEC = 0.1
+
+
 def run_test(song_path: Path, output_dir: Path):
     """
     Test find_hooks with different prefer_bars values.
@@ -52,8 +56,8 @@ def run_test(song_path: Path, output_dir: Path):
             for i, hook in enumerate(hooks):
                 actual_dur_sec = hook.end - hook.start
                 
-                # Allow 0.1s tolerance or equal to track duration
-                duration_ok = abs(actual_dur_sec - expected_win_sec) <= 0.1
+                # Allow tolerance or equal to track duration
+                duration_ok = abs(actual_dur_sec - expected_win_sec) <= DURATION_TOLERANCE_SEC
                 
                 if not duration_ok:
                     print(f"  ⚠ Hook {i}: duration {actual_dur_sec:.2f}s != expected {expected_win_sec:.2f}s")

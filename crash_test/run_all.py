@@ -8,6 +8,10 @@ from pathlib import Path
 from datetime import datetime
 
 
+# Timestamp format for run_id
+RUN_ID_FORMAT = "%Y-%m-%d_%H%M"
+
+
 def load_config():
     """Load crash test configuration from config.yml."""
     config_path = Path(__file__).parent / "config.yml"
@@ -28,7 +32,7 @@ def main():
     print("=" * 80)
     
     # Create run_id from timestamp
-    run_id = datetime.now().strftime("%Y-%m-%d_%H%M")
+    run_id = datetime.now().strftime(RUN_ID_FORMAT)
     
     # Create results directory
     results_base = Path(__file__).parent / "results"

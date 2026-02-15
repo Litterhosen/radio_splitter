@@ -7,6 +7,10 @@ import soundfile as sf
 from pathlib import Path
 
 
+# Random seed for reproducible synthetic audio generation
+RANDOM_SEED = 42
+
+
 def generate_song_120bpm(output_path: Path, duration_sec: float = 180.0):
     """
     Generate a 3-minute synthetic song with a clear beat at 120 BPM.
@@ -77,7 +81,7 @@ def generate_broadcast_32min(output_path: Path, duration_sec: float = 1920.0):
     audio = []
     
     elapsed = 0.0
-    np.random.seed(42)  # For reproducibility
+    np.random.seed(RANDOM_SEED)  # For reproducibility
     
     while elapsed < duration_sec:
         # Speech-like burst duration: 0.5 to 8 seconds

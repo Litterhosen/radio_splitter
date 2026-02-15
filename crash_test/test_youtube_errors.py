@@ -49,7 +49,7 @@ def run_test(youtube_url: str, output_dir: Path):
             "Network error"
         ),
         (
-            "Sign in to confirm your age",
+            "Sign in to confirm you're not a bot and verify your age",
             ErrorClassification.ERR_AGE_RESTRICTED,
             "Age-restricted error"
         ),
