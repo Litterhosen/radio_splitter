@@ -34,7 +34,7 @@ def run_test(youtube_url: str, output_dir: Path):
     # Test error classification with simulated errors
     test_cases = [
         (
-            "ERROR: PhantomJS or Node.js not found",
+            "ERROR: No supported JavaScript runtime found",
             ErrorClassification.ERR_JS_RUNTIME_MISSING,
             "JS runtime missing error"
         ),
@@ -44,13 +44,13 @@ def run_test(youtube_url: str, output_dir: Path):
             "Video unavailable error"
         ),
         (
-            "ERROR: Unable to download webpage: Connection timed out",
+            "ERROR: network timeout occurred",
             ErrorClassification.ERR_NETWORK,
             "Network error"
         ),
         (
             "Sign in to confirm your age",
-            ErrorClassification.ERR_LOGIN_REQUIRED,
+            ErrorClassification.ERR_AGE_RESTRICTED,
             "Age-restricted error"
         ),
         (

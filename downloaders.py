@@ -13,6 +13,7 @@ class ErrorClassification(Enum):
     ERR_JS_RUNTIME_MISSING = "ERR_JS_RUNTIME_MISSING"
     ERR_VIDEO_UNAVAILABLE = "ERR_VIDEO_UNAVAILABLE"
     ERR_GEO_BLOCK = "ERR_GEO_BLOCK"
+    ERR_AGE_RESTRICTED = "ERR_AGE_RESTRICTED"
     ERR_LOGIN_REQUIRED = "ERR_LOGIN_REQUIRED"
     ERR_NETWORK = "ERR_NETWORK"
     ERR_UNKNOWN = "ERR_UNKNOWN"
@@ -118,11 +119,20 @@ def classify_error(error_text: str, has_js_runtime: bool) -> Tuple[ErrorClassifi
             "3. Try a different video available in your region"
         )
     
-    if "sign in" in error_lower or "login" in error_lower or "authenticate" in error_lower or "age" in error_lower:
+    if "age" in error_lower or "sign in to confirm" in error_lower:
+        return (
+            ErrorClassification.ERR_AGE_RESTRICTED,
+            "Video is age-restricted",
+            "1. Video requires age verification\n"
+            "2. Try using cookies file with --cookies option\n"
+            "3. Ensure you have access to this content"
+        )
+    
+    if "sign in" in error_lower or "login" in error_lower or "authenticate" in error_lower:
         return (
             ErrorClassification.ERR_LOGIN_REQUIRED,
-            "Video requires authentication or age verification",
-            "1. Video may be age-restricted or private\n"
+            "Video requires authentication",
+            "1. Video may be private or members-only\n"
             "2. Try using cookies file with --cookies option\n"
             "3. Ensure you have access to this content"
         )
