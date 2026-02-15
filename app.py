@@ -60,7 +60,11 @@ from ui_utils import (
 # ----------------------------
 # Initialize Output Directory
 # ----------------------------
-ensure_dir(OUTPUT_ROOT)
+try:
+    ensure_dir(OUTPUT_ROOT)
+except Exception as e:
+    st.error(f"⚠️ Could not create output directory '{OUTPUT_ROOT}': {e}")
+    st.stop()
 
 # ----------------------------
 # Initialize Session State
