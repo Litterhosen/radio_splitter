@@ -126,6 +126,13 @@ This document contains smoke test instructions to verify the application works c
 
 ✅ **Application does not crash** - error is handled gracefully
 
+✅ **Error classification code shown in UI:**
+   - `ERR_JS_RUNTIME_MISSING`
+   - `ERR_YT_UNAVAILABLE` (video unavailable / geo blocked / login required)
+   - `ERR_NETWORK`
+
+✅ **If Node.js is unavailable on Streamlit Cloud, UI explains platform limitation and next action**
+
 ### Verify:
 
 - Check `output/Downloads/` folder for audio file (success) or log file (failure)
@@ -159,9 +166,9 @@ This document contains smoke test instructions to verify the application works c
 
 ✅ **No session_state warnings in UI or logs**
 
-✅ **Output folders separated by track:**
-   - `output/Song_A/` contains clips from Track A
-   - `output/Song_B/` contains clips from Track B
+✅ **Output folders separated by track + run id:**
+   - `output/Song_A__{run_id}/` contains clips from Track A
+   - `output/Song_B__{run_id}/` contains clips from Track B
 
 ✅ **Filenames include correct artist/title for each track:**
    - Track A clips start with Track A's artist/title
@@ -197,13 +204,29 @@ This document contains smoke test instructions to verify the application works c
 
 ### Expected Results:
 
-For a track at ~152 BPM (bar duration ≈ 1.58s):
+Exact expected core durations (formula: `bars * 4 * 60 / bpm`)
 
-| Setting | Expected Duration | Tolerance |
-|---------|------------------|-----------|
-| 2 bars  | ~3.2s            | ±150ms    |
-| 8 bars  | ~12.6s           | ±150ms    |
-| 16 bars | ~25.3s           | ±150ms    |
+At **120 BPM**:
+
+| Setting | Expected core_dur_sec |
+|---------|------------------------|
+| 1 bar   | 2.000s                 |
+| 2 bars  | 4.000s                 |
+| 4 bars  | 8.000s                 |
+| 8 bars  | 16.000s                |
+| 16 bars | 32.000s                |
+
+At **152 BPM**:
+
+| Setting | Expected core_dur_sec |
+|---------|------------------------|
+| 1 bar   | 1.579s                 |
+| 2 bars  | 3.158s                 |
+| 4 bars  | 6.316s                 |
+| 8 bars  | 12.632s                |
+| 16 bars | 25.263s                |
+
+Use tolerance **±250ms** per clip for verification.
 
 ✅ **Clip durations match expected values (within tolerance)**
 

@@ -81,10 +81,10 @@ def test_3_youtube_error_classification():
     from downloaders import ErrorClassification, classify_error
     
     test_cases = [
-        ("Video unavailable", ErrorClassification.ERR_VIDEO_UNAVAILABLE),
-        ("This video has been removed", ErrorClassification.ERR_VIDEO_UNAVAILABLE),
-        ("Sign in to confirm your age", ErrorClassification.ERR_LOGIN_REQUIRED),
-        ("not available in your country", ErrorClassification.ERR_GEO_BLOCK),
+        ("Video unavailable", ErrorClassification.ERR_YT_UNAVAILABLE),
+        ("This video has been removed", ErrorClassification.ERR_YT_UNAVAILABLE),
+        ("Sign in to confirm your age", ErrorClassification.ERR_YT_UNAVAILABLE),
+        ("not available in your country", ErrorClassification.ERR_YT_UNAVAILABLE),
         ("HTTP Error 503", ErrorClassification.ERR_NETWORK),
         ("Connection timeout", ErrorClassification.ERR_NETWORK),
     ]

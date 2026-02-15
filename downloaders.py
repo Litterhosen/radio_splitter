@@ -11,9 +11,7 @@ from enum import Enum
 class ErrorClassification(Enum):
     """Error classification for YouTube download failures."""
     ERR_JS_RUNTIME_MISSING = "ERR_JS_RUNTIME_MISSING"
-    ERR_VIDEO_UNAVAILABLE = "ERR_VIDEO_UNAVAILABLE"
-    ERR_GEO_BLOCK = "ERR_GEO_BLOCK"
-    ERR_LOGIN_REQUIRED = "ERR_LOGIN_REQUIRED"
+    ERR_YT_UNAVAILABLE = "ERR_YT_UNAVAILABLE"
     ERR_NETWORK = "ERR_NETWORK"
     ERR_UNKNOWN = "ERR_UNKNOWN"
 
@@ -87,19 +85,23 @@ def classify_error(error_text: str, has_js_runtime: bool) -> Tuple[ErrorClassifi
     error_lower = error_text.lower()
     
     # Check for specific error patterns
-    if not has_js_runtime and ("player" in error_lower or "signature" in error_lower):
+    if (
+        (not has_js_runtime and ("player" in error_lower or "signature" in error_lower))
+        or "no supported javascript runtime" in error_lower
+        or "javascript runtime" in error_lower
+    ):
         return (
             ErrorClassification.ERR_JS_RUNTIME_MISSING,
             "JavaScript runtime (Node.js) is required for this video",
-            "1. Install Node.js from https://nodejs.org/\n"
-            "2. Restart the application\n"
-            "3. Try the download again"
+            "1. Local/dev: install Node.js from https://nodejs.org/\n"
+            "2. Streamlit Cloud: Node.js may be unavailable in runtime; this is a platform limitation\n"
+            "3. Try another URL, or run this app where Node.js is available"
         )
     
     if "video unavailable" in error_lower or "removed" in error_lower or "deleted" in error_lower:
         return (
-            ErrorClassification.ERR_VIDEO_UNAVAILABLE,
-            "Video is unavailable, removed, or deleted",
+            ErrorClassification.ERR_YT_UNAVAILABLE,
+            "Video is unavailable, removed, deleted, geo-restricted, or requires login",
             "1. Verify the URL is correct\n"
             "2. Check if the video exists in your browser\n"
             "3. Try a different video URL"
@@ -107,7 +109,7 @@ def classify_error(error_text: str, has_js_runtime: bool) -> Tuple[ErrorClassifi
     
     if "geo" in error_lower or "not available in your country" in error_lower or "region" in error_lower:
         return (
-            ErrorClassification.ERR_GEO_BLOCK,
+            ErrorClassification.ERR_YT_UNAVAILABLE,
             "Video is geo-blocked or region-restricted",
             "1. This video cannot be accessed from your location\n"
             "2. Consider using a VPN (if permitted)\n"
@@ -116,7 +118,7 @@ def classify_error(error_text: str, has_js_runtime: bool) -> Tuple[ErrorClassifi
     
     if "sign in" in error_lower or "login" in error_lower or "authenticate" in error_lower or "age" in error_lower:
         return (
-            ErrorClassification.ERR_LOGIN_REQUIRED,
+            ErrorClassification.ERR_YT_UNAVAILABLE,
             "Video requires authentication or age verification",
             "1. Video may be age-restricted or private\n"
             "2. Try using cookies file with --cookies option\n"
@@ -265,6 +267,11 @@ def download_audio(url, out_dir) -> Tuple[Path, Dict]:
         except Exception as e:
             last_error = str(e)
             logger.error(f"Strategy '{strategy}' failed: {last_error}")
+            error_code_probe, _, _ = classify_error(last_error, js_runtime is not None)
+            # Do not keep retrying unavailable/login/geo or JS-runtime failures.
+            if error_code_probe in {ErrorClassification.ERR_JS_RUNTIME_MISSING, ErrorClassification.ERR_YT_UNAVAILABLE}:
+                logger.warning(f"Stopping retries due to terminal error class: {error_code_probe.value}")
+                break
             continue
     
     # All strategies failed - classify the error
