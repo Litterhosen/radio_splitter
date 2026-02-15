@@ -62,8 +62,8 @@ from ui_utils import (
 # ----------------------------
 try:
     ensure_dir(OUTPUT_ROOT)
-except Exception as e:
-    st.error(f"⚠️ Could not create output directory '{OUTPUT_ROOT}': {e}")
+except Exception:
+    st.error(f"⚠️ Could not create output directory '{OUTPUT_ROOT}'. Please check permissions and disk space.")
     st.stop()
 
 # ----------------------------

@@ -25,7 +25,8 @@ def bars_ui_to_int(bars_ui: str) -> int:
 def get_whisper_language() -> Optional[str]:
     """Convert UI language to whisper language code"""
     mapping = {"Auto": None, "Dansk": "da", "English": "en"}
-    return mapping.get(st.session_state.get("whisper_language_ui", "Auto"), None)
+    language_ui = st.session_state.get("whisper_language_ui", "Auto")
+    return mapping.get(language_ui, None)
 
 
 def detect_themes(text: str) -> List[str]:
