@@ -31,6 +31,7 @@ from jingle_finder import jingle_score
 from hook_finder import ffmpeg_to_wav16k_mono, find_hooks
 from beat_refine import refine_best_1_or_2_bars
 from utils import ensure_dir, hhmmss_ms, mmss, safe_slug, safe_dirname, clip_uid, estimate_bars_from_duration, snap_bars_to_valid, extract_track_metadata
+from audio_detection import detect_audio_type, normalize_text_for_signature, extract_language_info
 
 # Import configuration and UI utilities
 from config import (
@@ -340,6 +341,12 @@ if run_btn:
             ffmpeg_to_wav16k_mono(in_path, wav16)
             st.write("✅ Conversion complete.")
             
+            # Auto-detect audio type
+            st.write("🔍 Detecting audio type...")
+            audio_detection = detect_audio_type(wav16, sr=16000, duration=30.0)
+            st.write(f"🎯 **Audio Type:** {audio_detection['audio_type_guess']} (confidence: {audio_detection['audio_type_confidence']:.2f})")
+            st.write(f"💡 **Recommended Mode:** {audio_detection['recommended_mode']}")
+            
             # ----------------------------
             # Mode: Song Hunter (Loops)
             # ----------------------------
@@ -394,6 +401,9 @@ if run_btn:
                 # Process each hook
                 progress_bar = st.progress(0)
                 total_hooks = len(candidates)
+                
+                # Track file-level language detection
+                file_language_detected = None
                 
                 for idx, cand in enumerate(candidates, start=1):
                     progress_bar.progress(idx / total_hooks)
@@ -462,6 +472,16 @@ if run_btn:
                     cut_segment_to_wav(in_path, temp_wav, aa, bb)
                     tjson = transcribe_wav(st.session_state.model, temp_wav, language=lang)
                     text = (tjson.get("text") or "").strip()
+                    
+                    # Track file-level language from first detected language
+                    if not file_language_detected and tjson.get("language"):
+                        file_language_detected = tjson.get("language")
+                    
+                    # Extract language info for this clip
+                    clip_lang_info = extract_language_info(tjson)
+                    
+                    # Generate text signature for grouping
+                    text_signature = normalize_text_for_signature(text, max_words=10)
                     
                     # Generate slug (max 24 chars, use __noslug if empty)
                     slug = ""
@@ -581,7 +601,15 @@ if run_btn:
                         "text": text[:240] if text else "",
                         "transcript_full_txt_path": "",
                         "transcript_full_json_path": "",
-                        "language_detected": t.get("language"),
+                        "language_detected": tjson.get("language"),
+                        "language_guess_file": file_language_detected or "unknown",
+                        "language_confidence_file": 0.7 if file_language_detected else 0.0,
+                        "language_guess_clip": clip_lang_info.get("language_guess", "unknown"),
+                        "language_confidence_clip": clip_lang_info.get("language_confidence", 0.0),
+                        "audio_type_guess": audio_detection.get("audio_type_guess", "unknown"),
+                        "audio_type_confidence": audio_detection.get("audio_type_confidence", 0.0),
+                        "recommended_mode": audio_detection.get("recommended_mode", ""),
+                        "clip_text_signature": text_signature,
                         "transcribe_model": st.session_state["model_size"],
                         "split_method_used": "hook",
                         "chunking_enabled": False,
@@ -628,6 +656,12 @@ if run_btn:
                     text = (t.get("text") or "").strip()
                     if not language_detected and t.get("language"):
                         language_detected = t.get("language")
+                    
+                    # Extract language info for this clip
+                    clip_lang_info = extract_language_info(t)
+                    
+                    # Generate text signature for grouping
+                    text_signature = normalize_text_for_signature(text, max_words=10)
 
                     for seg in t.get("segments", []):
                         full_transcript_segments.append({
@@ -708,6 +742,14 @@ if run_btn:
                         "transcript_full_txt_path": "",
                         "transcript_full_json_path": "",
                         "language_detected": t.get("language"),
+                        "language_guess_file": language_detected or "unknown",
+                        "language_confidence_file": 0.7 if language_detected else 0.0,
+                        "language_guess_clip": clip_lang_info.get("language_guess", "unknown"),
+                        "language_confidence_clip": clip_lang_info.get("language_confidence", 0.0),
+                        "audio_type_guess": audio_detection.get("audio_type_guess", "unknown"),
+                        "audio_type_confidence": audio_detection.get("audio_type_confidence", 0.0),
+                        "recommended_mode": audio_detection.get("recommended_mode", ""),
+                        "clip_text_signature": text_signature,
                         "transcribe_model": st.session_state["model_size"],
                         "split_method_used": "vad",
                         "chunking_enabled": False,
@@ -807,6 +849,57 @@ if run_btn:
                 st.session_state.qa_report = qa_report
 
 # ----------------------------
+# Helper function for displaying clip cards
+# ----------------------------
+def _display_clip_card(r):
+    """Display a clip preview card with enhanced metadata"""
+    p = Path(r["clip_path"])
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        st.write(f"**{r['filename']}**")
+        
+        # Build caption with available fields
+        caption_parts = [f"⏱️ {float(r['dur_sec']):.2f}s"]
+        if r.get('bpm_used', 0) > 0:
+            caption_parts.append(f"🎵 {r.get('bpm_used', 0)} BPM")
+        if r.get('bars_used'):
+            caption_parts.append(f"📊 {r.get('bars_used')} bars")
+        if r.get('hook_score', 0) > 0:
+            caption_parts.append(f"⭐ {r.get('hook_score', 0):.2f}")
+        
+        # Add language label
+        lang = r.get("language_guess_clip", r.get("language_detected", ""))
+        if lang:
+            lang_emoji = {"da": "🇩🇰", "en": "🇬🇧"}.get(lang, "🌐")
+            caption_parts.append(f"{lang_emoji} {lang.upper()}")
+        
+        st.caption(" | ".join(caption_parts))
+        
+        # Display transcript snippet with language and themes
+        if r.get("text"):
+            text = r["text"]
+            # Show first 150 chars as snippet
+            snippet = text[:150] + "..." if len(text) > 150 else text
+            st.write(f"📝 {snippet}")
+            
+            # Show full text button (text is already visible in manifest)
+            if len(text) > 150 and st.button(f"📋 Show full text", key=f"show_{r.get('clip', 0)}_{r.get('filename', '')}"):
+                st.code(text, language=None)
+        
+        # Show tags and themes
+        if r.get('tags') or r.get('themes'):
+            tag_theme_parts = []
+            if r.get('tags'):
+                tag_theme_parts.append(f"🏷️ {r.get('tags', '')}")
+            if r.get('themes'):
+                tag_theme_parts.append(f"🎨 {r.get('themes', '')}")
+            st.caption(" | ".join(tag_theme_parts))
+    
+    with col2:
+        if p.exists():
+            st.audio(p.read_bytes())
+
+# ----------------------------
 # Results Browser / Export
 # ----------------------------
 if "results" in st.session_state and st.session_state.results:
@@ -865,76 +958,117 @@ if "results" in st.session_state and st.session_state.results:
     selected = edited[edited["pick"] == True].copy()
     st.write(f"**Selected:** {len(selected)} clips")
 
-    # Preview controls: sort + show all/paginated
-    sort_options = []
-    if "hook_score" in selected.columns:
-        sort_options.append("hook_score")
-    if "energy" in selected.columns:
-        sort_options.append("energy")
-    sort_options = sort_options or ["clip"]
+    # Grouping controls
+    col_group1, col_group2 = st.columns([1, 1])
+    with col_group1:
+        grouping_options = ["None", "Group by Phrase", "Group by Tag/Theme", "Group by Language"]
+        group_by = st.selectbox("Grouping", grouping_options, index=0, key="group_by")
+    with col_group2:
+        # Preview controls: sort + show all/paginated
+        sort_options = []
+        if "hook_score" in selected.columns:
+            sort_options.append("hook_score")
+        if "energy" in selected.columns:
+            sort_options.append("energy")
+        sort_options = sort_options or ["clip"]
+        preview_sort = st.selectbox("Sort by", sort_options, index=0, key="preview_sort")
 
-    preview_sort = st.selectbox("Preview sort", sort_options, index=0, key="preview_sort")
     if preview_sort in selected.columns:
         selected = selected.sort_values(preview_sort, ascending=False, kind="stable")
 
     show_all_preview = st.checkbox("Show all selected clips", value=False, key="preview_show_all")
 
-    # Preview section - show all clips or paginated clips
-    clips_per_page = 20
-    total_clips = len(selected)
-    total_pages = (total_clips + clips_per_page - 1) // clips_per_page  # Ceiling division
+    # Group clips if grouping is enabled
+    if group_by == "Group by Phrase":
+        # Group by text signature
+        groups = {}
+        for idx, r in selected.iterrows():
+            sig = r.get("clip_text_signature", "")
+            if not sig:
+                sig = "[No text]"
+            if sig not in groups:
+                groups[sig] = []
+            groups[sig].append((idx, r))
+        
+        with st.expander(f"🎧 Preview Selected ({total_clips} clips) - {len(groups)} groups", expanded=True):
+            for sig, items in sorted(groups.items(), key=lambda x: -len(x[1])):
+                with st.expander(f"📋 \"{sig[:60]}...\" ({len(items)} clips)", expanded=len(items) <= 3):
+                    for idx, r in items:
+                        _display_clip_card(r)
+    
+    elif group_by == "Group by Tag/Theme":
+        # Group by tags
+        groups = {}
+        for idx, r in selected.iterrows():
+            tags = str(r.get("tags", "")).split(", ")
+            themes = str(r.get("themes", "")).split(", ")
+            combined = [t.strip() for t in (tags + themes) if t.strip()]
+            key = ", ".join(combined[:3]) if combined else "[No tags]"
+            if key not in groups:
+                groups[key] = []
+            groups[key].append((idx, r))
+        
+        with st.expander(f"🎧 Preview Selected ({total_clips} clips) - {len(groups)} groups", expanded=True):
+            for tag_key, items in sorted(groups.items(), key=lambda x: -len(x[1])):
+                with st.expander(f"🏷️ {tag_key} ({len(items)} clips)", expanded=len(items) <= 3):
+                    for idx, r in items:
+                        _display_clip_card(r)
+    
+    elif group_by == "Group by Language":
+        # Group by language
+        groups = {}
+        for idx, r in selected.iterrows():
+            lang = r.get("language_guess_clip", r.get("language_detected", "unknown"))
+            if lang not in groups:
+                groups[lang] = []
+            groups[lang].append((idx, r))
+        
+        with st.expander(f"🎧 Preview Selected ({total_clips} clips) - {len(groups)} groups", expanded=True):
+            for lang, items in sorted(groups.items(), key=lambda x: -len(x[1])):
+                lang_label = {"da": "🇩🇰 Danish", "en": "🇬🇧 English", "unknown": "❓ Unknown"}.get(lang, f"🌐 {lang}")
+                with st.expander(f"{lang_label} ({len(items)} clips)", expanded=len(items) <= 3):
+                    for idx, r in items:
+                        _display_clip_card(r)
+    
+    else:
+        # No grouping - standard pagination
+        clips_per_page = 20
+        total_clips = len(selected)
+        total_pages = (total_clips + clips_per_page - 1) // clips_per_page
 
-    run_preview_key = f"preview_page__{st.session_state.get('active_run_id', 'default')}"
-    if run_preview_key not in st.session_state:
-        st.session_state[run_preview_key] = 0
+        run_preview_key = f"preview_page__{st.session_state.get('active_run_id', 'default')}"
+        if run_preview_key not in st.session_state:
+            st.session_state[run_preview_key] = 0
 
-    with st.expander(f"🎧 Preview Selected ({total_clips} clips)", expanded=True):
-        if total_clips > 0:
-            if show_all_preview:
-                page_clips = selected
-                st.write(f"Showing all {total_clips} clips")
-            else:
-                # Pagination controls
-                if total_pages > 1:
-                    col_prev, col_info, col_next = st.columns([1, 2, 1])
-                    with col_prev:
-                        if st.button("⬅️ Previous", disabled=st.session_state[run_preview_key] == 0):
-                            st.session_state[run_preview_key] = max(0, st.session_state[run_preview_key] - 1)
-                            st.rerun()
-                    with col_info:
-                        st.write(f"Page {st.session_state[run_preview_key] + 1} of {total_pages}")
-                    with col_next:
-                        if st.button("Next ➡️", disabled=st.session_state[run_preview_key] >= total_pages - 1):
-                            st.session_state[run_preview_key] = min(total_pages - 1, st.session_state[run_preview_key] + 1)
-                            st.rerun()
+        with st.expander(f"🎧 Preview Selected ({total_clips} clips)", expanded=True):
+            if total_clips > 0:
+                if show_all_preview:
+                    page_clips = selected
+                    st.write(f"Showing all {total_clips} clips")
+                else:
+                    # Pagination controls
+                    if total_pages > 1:
+                        col_prev, col_info, col_next = st.columns([1, 2, 1])
+                        with col_prev:
+                            if st.button("⬅️ Previous", disabled=st.session_state[run_preview_key] == 0):
+                                st.session_state[run_preview_key] = max(0, st.session_state[run_preview_key] - 1)
+                                st.rerun()
+                        with col_info:
+                            st.write(f"Page {st.session_state[run_preview_key] + 1} of {total_pages}")
+                        with col_next:
+                            if st.button("Next ➡️", disabled=st.session_state[run_preview_key] >= total_pages - 1):
+                                st.session_state[run_preview_key] = min(total_pages - 1, st.session_state[run_preview_key] + 1)
+                                st.rerun()
 
-                # Calculate page slice
-                start_idx = st.session_state[run_preview_key] * clips_per_page
-                end_idx = min(start_idx + clips_per_page, total_clips)
-                page_clips = selected.iloc[start_idx:end_idx]
-            
-            # Display clips
-            for idx, r in page_clips.iterrows():
-                p = Path(r["clip_path"])
-                col1, col2 = st.columns([3, 1])
-                with col1:
-                    st.write(f"**{r['filename']}**")
-                    # Build caption with available fields
-                    caption_parts = [f"Duration: {float(r['dur_sec']):.2f}s"]
-                    if r.get('bpm_used', 0) > 0:
-                        caption_parts.append(f"BPM: {r.get('bpm_used', 0)}")
-                    if r.get('bars_used'):
-                        caption_parts.append(f"Bars: {r.get('bars_used')}")
-                    if r.get('hook_score', 0) > 0:
-                        caption_parts.append(f"Score: {r.get('hook_score', 0):.2f}")
-                    if r.get('tags'):
-                        caption_parts.append(f"Tags: {r.get('tags', '')}")
-                    st.caption(" | ".join(caption_parts))
-                    if r.get("text"):
-                        st.write(f"📝 {r['text']}")
-                with col2:
-                    if p.exists():
-                        st.audio(p.read_bytes())
+                    # Calculate page slice
+                    start_idx = st.session_state[run_preview_key] * clips_per_page
+                    end_idx = min(start_idx + clips_per_page, total_clips)
+                    page_clips = selected.iloc[start_idx:end_idx]
+                
+                # Display clips
+                for idx, r in page_clips.iterrows():
+                    _display_clip_card(r)
+
     
     # Full transcript browser + download (Broadcast mode)
     if st.session_state.get("source_artifacts"):
