@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from typing import Optional, Dict, Any
 
+import streamlit as st
 from faster_whisper import WhisperModel
 
 # Supported languages for explicit transcription
@@ -15,7 +16,9 @@ class WhisperState:
     compute_type: str
 
 
+@st.cache_resource
 def load_model(model_size: str = "small", device: str = "cpu", compute_type: str = "int8") -> WhisperModel:
+    """Load Whisper model with caching to avoid reloading on every rerun"""
     return WhisperModel(model_size, device=device, compute_type=compute_type)
 
 
