@@ -55,6 +55,9 @@ def detect_audio_type(audio_path: Path, sr: int = 16000, duration: float = 30.0)
         }
     
     except Exception as e:
+        # Log error for debugging
+        import sys
+        print(f"Warning: Audio detection failed: {e}", file=sys.stderr)
         # Fallback on error
         return {
             "audio_type_guess": "unknown",
@@ -82,7 +85,7 @@ def _extract_audio_features(y: np.ndarray, sr: int) -> Dict[str, float]:
         tempo, beats = librosa.beat.beat_track(y=y, sr=sr)
         features['tempo'] = float(tempo) if tempo else 0.0
         features['beat_strength'] = float(len(beats) / (len(y) / sr)) if len(beats) > 0 else 0.0
-    except:
+    except Exception as e:
         features['tempo'] = 0.0
         features['beat_strength'] = 0.0
     

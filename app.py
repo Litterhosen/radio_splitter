@@ -402,6 +402,9 @@ if run_btn:
                 progress_bar = st.progress(0)
                 total_hooks = len(candidates)
                 
+                # Track file-level language detection
+                file_language_detected = None
+                
                 for idx, cand in enumerate(candidates, start=1):
                     progress_bar.progress(idx / total_hooks)
                     
@@ -469,6 +472,10 @@ if run_btn:
                     cut_segment_to_wav(in_path, temp_wav, aa, bb)
                     tjson = transcribe_wav(st.session_state.model, temp_wav, language=lang)
                     text = (tjson.get("text") or "").strip()
+                    
+                    # Track file-level language from first detected language
+                    if not file_language_detected and tjson.get("language"):
+                        file_language_detected = tjson.get("language")
                     
                     # Extract language info for this clip
                     clip_lang_info = extract_language_info(tjson)
@@ -595,8 +602,8 @@ if run_btn:
                         "transcript_full_txt_path": "",
                         "transcript_full_json_path": "",
                         "language_detected": tjson.get("language"),
-                        "language_guess_file": audio_detection.get("audio_type_guess", "unknown"),
-                        "language_confidence_file": audio_detection.get("audio_type_confidence", 0.0),
+                        "language_guess_file": file_language_detected or "unknown",
+                        "language_confidence_file": 0.7 if file_language_detected else 0.0,
                         "language_guess_clip": clip_lang_info.get("language_guess", "unknown"),
                         "language_confidence_clip": clip_lang_info.get("language_confidence", 0.0),
                         "audio_type_guess": audio_detection.get("audio_type_guess", "unknown"),
@@ -735,8 +742,8 @@ if run_btn:
                         "transcript_full_txt_path": "",
                         "transcript_full_json_path": "",
                         "language_detected": t.get("language"),
-                        "language_guess_file": audio_detection.get("audio_type_guess", "unknown"),
-                        "language_confidence_file": audio_detection.get("audio_type_confidence", 0.0),
+                        "language_guess_file": language_detected or "unknown",
+                        "language_confidence_file": 0.7 if language_detected else 0.0,
                         "language_guess_clip": clip_lang_info.get("language_guess", "unknown"),
                         "language_confidence_clip": clip_lang_info.get("language_confidence", 0.0),
                         "audio_type_guess": audio_detection.get("audio_type_guess", "unknown"),
@@ -875,8 +882,8 @@ def _display_clip_card(r):
             snippet = text[:150] + "..." if len(text) > 150 else text
             st.write(f"📝 {snippet}")
             
-            # Copy text button
-            if st.button(f"📋 Copy text", key=f"copy_{r.get('clip', 0)}_{r.get('filename', '')}"):
+            # Show full text button (text is already visible in manifest)
+            if len(text) > 150 and st.button(f"📋 Show full text", key=f"show_{r.get('clip', 0)}_{r.get('filename', '')}"):
                 st.code(text, language=None)
         
         # Show tags and themes
