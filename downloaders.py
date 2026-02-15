@@ -87,13 +87,17 @@ def classify_error(error_text: str, has_js_runtime: bool) -> Tuple[ErrorClassifi
     error_lower = error_text.lower()
     
     # Check for specific error patterns
-    if not has_js_runtime and ("player" in error_lower or "signature" in error_lower):
+    if (
+        (not has_js_runtime and ("player" in error_lower or "signature" in error_lower))
+        or "no supported javascript runtime" in error_lower
+        or "javascript runtime" in error_lower
+    ):
         return (
             ErrorClassification.ERR_JS_RUNTIME_MISSING,
             "JavaScript runtime (Node.js) is required for this video",
-            "1. Install Node.js from https://nodejs.org/\n"
-            "2. Restart the application\n"
-            "3. Try the download again"
+            "1. Local/dev: install Node.js from https://nodejs.org/\n"
+            "2. Streamlit Cloud: Node.js may be unavailable in runtime; this is a platform limitation\n"
+            "3. Try another URL, or run this app where Node.js is available"
         )
     
     if "video unavailable" in error_lower or "removed" in error_lower or "deleted" in error_lower:

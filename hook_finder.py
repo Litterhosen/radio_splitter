@@ -169,14 +169,16 @@ def find_hooks(
 
     min_len, max_len = hook_len_range
     
+    use_bar_length = prefer_bars is not None and prefer_bars > 0 and global_bpm > 0
+
     # Calculate target window length based on prefer_bars if provided
-    if prefer_bars is not None and prefer_bars > 0 and global_bpm > 0:
+    if use_bar_length:
         # Calculate bar duration: (60 / BPM) * beats_per_bar
         bar_duration = (60.0 / global_bpm) * beats_per_bar
         target_len = prefer_bars * bar_duration
-        
-        # Clamp to range with some flexibility
-        win_len = max(min_len, min(target_len, max_len))
+        # In bar mode, user preference owns loop duration.
+        # Keep only a safety floor, and cap to track duration.
+        win_len = max(min_len, min(target_len, duration))
     else:
         # Fallback to prefer_len
         win_len = max(min_len, min(prefer_len, max_len))
@@ -188,7 +190,7 @@ def find_hooks(
     # Scan with multiple window sizes within the range for better detection
     MIN_WINDOW_SIZE_DIFFERENCE = 1.0  # seconds
     window_sizes = [win_len]
-    if max_len > min_len:
+    if (not use_bar_length) and max_len > min_len:
         # Add min and max if they're different from prefer_len
         if abs(min_len - win_len) > MIN_WINDOW_SIZE_DIFFERENCE:
             window_sizes.append(min_len)

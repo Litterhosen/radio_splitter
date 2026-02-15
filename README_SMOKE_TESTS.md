@@ -126,6 +126,15 @@ This document contains smoke test instructions to verify the application works c
 
 ✅ **Application does not crash** - error is handled gracefully
 
+✅ **Error classification code shown in UI:**
+   - `ERR_JS_RUNTIME_MISSING`
+   - `ERR_VIDEO_UNAVAILABLE`
+   - `ERR_GEO_BLOCK`
+   - `ERR_LOGIN_REQUIRED`
+   - `ERR_NETWORK`
+
+✅ **If Node.js is unavailable on Streamlit Cloud, UI explains platform limitation and next action**
+
 ### Verify:
 
 - Check `output/Downloads/` folder for audio file (success) or log file (failure)
@@ -159,9 +168,9 @@ This document contains smoke test instructions to verify the application works c
 
 ✅ **No session_state warnings in UI or logs**
 
-✅ **Output folders separated by track:**
-   - `output/Song_A/` contains clips from Track A
-   - `output/Song_B/` contains clips from Track B
+✅ **Output folders separated by track + run id:**
+   - `output/Song_A__{run_id}/` contains clips from Track A
+   - `output/Song_B__{run_id}/` contains clips from Track B
 
 ✅ **Filenames include correct artist/title for each track:**
    - Track A clips start with Track A's artist/title

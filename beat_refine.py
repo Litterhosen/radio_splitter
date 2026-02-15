@@ -43,7 +43,8 @@ def refine_to_n_bars(
     y_segment = y[int(window_start * sr): int(window_end * sr)]
     duration = len(y_segment) / float(sr)
 
-    if len(y_segment) < sr:
+    # Guard: only classify as too_short under product threshold (2.0s)
+    if duration < 2.0:
         return RefineResult(
             False, 0, 0, 0, 0, 0, "too_short",
             bars_estimated=0, bpm_confidence=0.0
