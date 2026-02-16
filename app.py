@@ -123,6 +123,26 @@ def maybe_refine_barloop(wav_for_analysis: Path, a: float, b: float) -> Tuple[fl
     return a, b, rr.bpm, None, rr.score, False, rr.reason, rr.bars_estimated, rr.bpm_confidence
 
 
+
+
+def stage_uploaded_files(files: Optional[List[Any]]) -> List[str]:
+    """Persist uploaded files to disk and return stable staged paths."""
+    if not files:
+        return []
+
+    if "upload_session_id" not in st.session_state:
+        st.session_state["upload_session_id"] = uuid4().hex[:12]
+
+    staging_dir = ensure_dir(OUTPUT_ROOT / "_staging" / st.session_state["upload_session_id"])
+    staged_paths: List[str] = []
+    for uf in files:
+        staged = staging_dir / uf.name
+        size = getattr(uf, "size", None)
+        if (not staged.exists()) or (size is not None and staged.stat().st_size != size):
+            staged.write_bytes(bytes(uf.getbuffer()))
+        staged_paths.append(str(staged))
+    return staged_paths
+
 def detect_file_language(model, in_path: Path, session_dir: Path, forced_language: Optional[str]) -> Dict[str, Any]:
     """Detect file-level language from longer samples or use forced policy."""
     if forced_language in {"da", "en"}:
@@ -336,10 +356,12 @@ with tab_link:
             st.error(f"❌ Unexpected error: {e}")
 
 # Prepare input paths
+if files is not None:
+    st.session_state["uploaded_files"] = stage_uploaded_files(files)
+
 input_paths = []
-if files:
-    for uf in files:
-        input_paths.append(("upload", uf.name, uf.getvalue(), None))
+for staged_path in st.session_state.get("uploaded_files", []):
+    input_paths.append(("path", staged_path, None, None))
 for entry in st.session_state.get("downloaded_files", []):
     # Handle both old format (str) and new format (dict)
     if isinstance(entry, dict):
@@ -370,16 +392,25 @@ if st.session_state["mode"] == "📻 Broadcast Hunter (Mix)":
     )
 
 if load_btn:
-    try:
-        with st.spinner("Loading model... (first time downloads it)"):
-            st.session_state.model = load_model(
-                model_size=st.session_state["model_size"],
-                device=st.session_state["device"],
-                compute_type=st.session_state["compute_type"],
-            )
-        st.success("✅ Model loaded successfully!")
-    except Exception as e:
-        st.error(f"❌ Could not load model: {e}")
+    model_key = (
+        st.session_state["model_size"],
+        st.session_state["device"],
+        st.session_state["compute_type"],
+    )
+    if st.session_state.model is not None and st.session_state.get("model_key") == model_key:
+        st.info("ℹ️ Model already loaded with current settings.")
+    else:
+        try:
+            with st.spinner("Loading model... (first time downloads it)"):
+                st.session_state.model = load_model(
+                    model_size=model_key[0],
+                    device=model_key[1],
+                    compute_type=model_key[2],
+                )
+                st.session_state["model_key"] = model_key
+            st.success("✅ Model loaded successfully!")
+        except Exception as e:
+            st.error(f"❌ Could not load model: {e}")
 
 if quick_scan_btn:
     if st.session_state.model is None:
@@ -446,6 +477,15 @@ if run_btn or st.session_state.pop("quick_scan_proceed", False):
     mode_now = st.session_state["mode"]
     run_id = datetime.utcnow().strftime("%Y%m%d_%H%M%S") + "_" + uuid4().hex[:8]
     run_scope_dir = ensure_dir(OUTPUT_ROOT / run_id)
+    run_meta = {
+        "run_id": run_id,
+        "mode": mode_now,
+        "started_at": datetime.utcnow().isoformat() + "Z",
+        "input_count": len(input_paths),
+        "completed": False,
+        "clips_exported": 0,
+    }
+    (run_scope_dir / "run_meta.json").write_text(json.dumps(run_meta, indent=2), encoding="utf-8")
 
     # Check if model is needed and loaded
     if st.session_state.model is None:
@@ -561,7 +601,7 @@ if run_btn or st.session_state.pop("quick_scan_proceed", False):
                     total_hooks = len(candidates)
                     
                     for idx, cand in enumerate(candidates, start=1):
-                        progress_bar.progress(idx / total_hooks)
+                        progress_bar.progress(idx / max(total_hooks, 1))
                         
                         a, b = float(cand["start"]), float(cand["end"])
                         
@@ -588,47 +628,30 @@ if run_btn or st.session_state.pop("quick_scan_proceed", False):
                         bpm_clip_confidence = cand.get("bpm_clip_confidence", 0.0)
                         
                         if refined_ok:
-                            # Refined: use beat-grid aligned values
-                            bpm_used = bpm_refined
+                            bpm_used = int(bpm_refined) if bpm_refined else int(global_bpm)
                             bpm_used_source = "refined_grid"
-                            raw_bars_estimate = bars_est  # Raw estimate before grid alignment
-                            bars_used = bars  # Grid-aligned bars
-                            final_bpm_conf = bpm_conf
+                            raw_bars_estimate = int(bars_est) if bars_est else estimate_bars_from_duration(dur, max(int(bpm_used), 1), beats_per_bar)
+                            bars_used = int(bars) if bars else int(prefer_bars)
+                            final_bpm_conf = float(bpm_conf)
                             refined_reason = ""
                         else:
-                            # Not refined: use estimates with snapping
-                            # Calculate raw bars estimate
-                            if bars_est > 0:
-                                raw_bars_estimate = bars_est
-                            else:
-                                raw_bars_estimate = estimate_bars_from_duration(dur, bpm_clip, 4)
-                            
-                            # Snap bars to valid values
-                            bars_used = snap_bars_to_valid(raw_bars_estimate, prefer_bars, tolerance=0.25)
-                            
-                            # Determine BPM to use: prefer global if high confidence
+                            raw_bars_estimate = int(bars_est) if bars_est else estimate_bars_from_duration(dur, max(int(bpm_clip), 1), beats_per_bar)
+                            bars_used = int(snap_bars_to_valid(raw_bars_estimate, prefer_bars, tolerance=0.25))
+                            bpm_used = int(bpm_clip)
                             if cand.get("bpm_source") == "track_global":
-                                bpm_used = bpm_clip  # Already normalized to global
                                 bpm_used_source = "global_snapped"
-                                final_bpm_conf = cand.get("bpm_confidence", global_confidence)
+                                final_bpm_conf = float(cand.get("bpm_confidence", global_confidence))
                             else:
-                                bpm_used = bpm_clip
                                 bpm_used_source = "segment_estimate"
-                                final_bpm_conf = bpm_clip_confidence
-                            
-                            # Use the reason from refinement attempt (disabled, too_short, no_onsets, etc.)
+                                final_bpm_conf = float(bpm_clip_confidence)
                             refined_reason = rreason
-                        
-                        # Generate UID
+
                         uid = clip_uid(in_name, aa, bb, idx)
-                        
-                        # Transcribe
                         temp_wav = session_dir / f"temp_{idx:04d}__whisper.wav"
                         cut_segment_to_wav(in_path, temp_wav, aa, bb)
                         tjson = transcribe_wav(st.session_state.model, temp_wav, language=lang)
                         text = (tjson.get("text") or "").strip()
-                        
-                        # Extract language info for this clip
+
                         clip_lang_info = extract_language_info(tjson)
                         clip_language = resolve_clip_language(
                             language_meta["language_guess_file"],
@@ -636,85 +659,28 @@ if run_btn or st.session_state.pop("quick_scan_proceed", False):
                             clip_lang_info,
                             text,
                         )
-                        
-                        # Generate text signature for grouping
+
                         text_signature = normalize_text_for_signature(text, max_words=10)
-                        
-                        # Generate slug (max 24 chars, use __noslug if empty)
                         slug = ""
                         if st.session_state["use_slug"] and text:
                             slug = safe_slug(" ".join(text.split()[:int(st.session_state["slug_words"])]), max_len=MAX_SLUG_LENGTH)
-                        
-                        # Filename format: {artist}-{title}__{idx}__{bpm}bpm__{bars}bar__{slug}__{uid6}.mp3
-                        # NO timestamps in main identifier per spec requirement
-                        
-                        # Build BPM/bars parts
+
                         if refined_ok:
                             bpm_part = f"{bpm_used}bpm"
                             bars_part = f"{bars_used}bar"
-                        # Use the reason from refinement attempt (disabled, too_short, no_onsets, etc.)
-                        refined_reason = rreason
-                    
-                    # Generate UID
-                    uid = clip_uid(in_name, aa, bb, idx)
-                    
-                    # Transcribe
-                    temp_wav = session_dir / f"temp_{idx:04d}__whisper.wav"
-                    cut_segment_to_wav(in_path, temp_wav, aa, bb)
-                    tjson = transcribe_wav(st.session_state.model, temp_wav, language=lang)
-                    text = (tjson.get("text") or "").strip()
-                    
-                    # Extract language info for this clip
-                    clip_lang_info = extract_language_info(tjson)
-                    clip_language = resolve_clip_language(
-                        language_meta["language_guess_file"],
-                        language_meta["language_confidence_file"],
-                        clip_lang_info,
-                        text,
-                    )
-                    
-                    # Generate text signature for grouping
-                    text_signature = normalize_text_for_signature(text, max_words=10)
-                    
-                    # Generate slug (max 24 chars, use __noslug if empty)
-                    slug = ""
-                    if st.session_state["use_slug"] and text:
-                        slug = safe_slug(" ".join(text.split()[:int(st.session_state["slug_words"])]), max_len=MAX_SLUG_LENGTH)
-                    
-                    # Filename format: {artist}-{title}__{idx}__{bpm}bpm__{bars}bar__{slug}__{uid6}.mp3
-                    # NO timestamps in main identifier per spec requirement
-                    
-                    # Build BPM/bars parts
-                    if refined_ok:
-                        bpm_part = f"{bpm_used}bpm"
-                        bars_part = f"{bars_used}bar"
-                    else:
-                        if final_bpm_conf < 0.4:
-                            bpm_part = f"{bpm_used}bpm_low"
                         else:
-                            if final_bpm_conf < 0.4:
-                                bpm_part = f"{bpm_used}bpm_low"
-                            else:
-                                bpm_part = f"{bpm_used}bpm_est"
+                            bpm_part = f"{bpm_used}bpm_low" if final_bpm_conf < 0.4 else f"{bpm_used}bpm_est"
                             bars_part = f"{bars_used}bar_est"
-                        
-                        # slug_part
+
                         slug_part = slug if slug else "noslug"
-                        
-                        # Build complete filename stem (NO timestamps)
-                        # Format: {artist}-{title}__{idx}__{bpm}bpm__{bars}bar__{slug}__{uid6}
-                        # Max length enforcement (see MAX_FILENAME_LENGTH and MAX_STEM_LENGTH constants)
                         stem = f"{track_artist}-{track_title}__{idx:04d}__{bpm_part}__{bars_part}__{slug_part}__{uid}"
-                        
-                        # Enforce max length
+
                         if len(stem) > MAX_STEM_LENGTH:
-                            # Truncate the slug part first, then title if needed
                             excess = len(stem) - MAX_STEM_LENGTH
                             if len(slug_part) > 10:
                                 slug_part = slug_part[:max(4, len(slug_part) - excess)]
                                 stem = f"{track_artist}-{track_title}__{idx:04d}__{bpm_part}__{bars_part}__{slug_part}__{uid}"
                             if len(stem) > MAX_STEM_LENGTH:
-                                # Still too long, truncate title
                                 title_len = len(track_title)
                                 excess = len(stem) - MAX_STEM_LENGTH
                                 track_title_trunc = track_title[:max(10, title_len - excess)]
@@ -1012,69 +978,81 @@ if run_btn or st.session_state.pop("quick_scan_proceed", False):
                                 encoding="utf-8",
                             )
 
+                    (session_dir / "diagnostics.json").write_text(
+                        json.dumps({"diagnostics": broadcast_diag, "split_method_used": split_method_used}, indent=2),
+                        encoding="utf-8",
+                    )
                     results.extend(source_rows)
 
             
         
         st.session_state.results = results
-        
+
+        if results:
+            manifest_path = run_scope_dir / "manifest.csv"
+            pd.DataFrame(results).to_csv(manifest_path, index=False)
+            st.session_state["manifest_path"] = str(manifest_path)
+
         if not results:
             status.update(label="⚠️ No clips found", state="error")
             st.error("No clips found with current settings. Try adjusting parameters.")
+            st.session_state.pop("qa_report", None)
         else:
             status.update(label=f"✅ Success! Found {len(results)} clips", state="complete")
             st.balloons()
             st.success(f"🎉 Finished! Found {len(results)} clips. Scroll down to preview.")
-            
-            st.session_state.results = results
-            
-            if not results:
-                status.update(label="⚠️ No clips found", state="error")
-                st.error("No clips found with current settings. Try adjusting parameters.")
-            else:
-                status.update(label=f"✅ Success! Found {len(results)} clips", state="complete")
-                st.balloons()
-                st.success(f"🎉 Finished! Found {len(results)} clips. Scroll down to preview.")
-                
-                # Generate QA Report for Song Hunter mode
-                if mode_now == "🎵 Song Hunter (Loops)":
-                    qa_report = {
-                        "total_clips": len(results),
-                        "refined_ok": sum(1 for r in results if r.get("refined", False)),
-                        "refined_fail": sum(1 for r in results if not r.get("refined", False)),
-                        "global_bpm": global_bpm if 'global_bpm' in locals() else 0,
-                        "global_confidence": round(global_confidence, 2) if 'global_confidence' in locals() else 0.0,
+
+            if mode_now == "🎵 Song Hunter (Loops)":
+                song_rows = [r for r in results if r.get("split_method_used") == "hook"]
+                qa_report = {
+                    "total_clips": len(song_rows),
+                    "refined_ok": sum(1 for r in song_rows if r.get("refined", False)),
+                    "refined_fail": sum(1 for r in song_rows if not r.get("refined", False)),
+                    "global_bpm": int(song_rows[0].get("bpm_global", 0)) if song_rows else 0,
+                    "global_confidence": float(song_rows[0].get("bpm_global_confidence", 0.0)) if song_rows else 0.0,
+                }
+
+                bpms = [r.get("bpm_used", 0) for r in song_rows if r.get("bpm_used", 0) > 0]
+                if bpms:
+                    qa_report["bpm_min"] = min(bpms)
+                    qa_report["bpm_max"] = max(bpms)
+                    qa_report["bpm_median"] = int(pd.Series(bpms).median())
+
+                sorted_results = sorted(song_rows, key=lambda r: r.get("hook_score", 0), reverse=True)
+                qa_report["top_hooks"] = [
+                    {
+                        "clip": r.get("clip"),
+                        "score": round(r.get("hook_score", 0), 2),
+                        "bpm": r.get("bpm_used"),
+                        "bars": r.get("bars_used"),
                     }
-                    
-                    # BPM statistics
-                    bpms = [r.get("bpm_used", 0) for r in results if r.get("bpm_used", 0) > 0]
-                    if bpms:
-                        qa_report["bpm_min"] = min(bpms)
-                        qa_report["bpm_max"] = max(bpms)
-                        qa_report["bpm_median"] = int(pd.Series(bpms).median())
-                    
-                    # Top hooks by score
-                    sorted_results = sorted(results, key=lambda r: r.get("hook_score", 0), reverse=True)
-                    qa_report["top_hooks"] = [
-                        {
-                            "clip": r.get("clip"),
-                            "score": round(r.get("hook_score", 0), 2),
-                            "bpm": r.get("bpm_used"),
-                            "bars": r.get("bars_used"),
-                        }
-                        for r in sorted_results[:10]
-                    ]
-                    
-                    # Refined fail reasons breakdown
-                    reasons = {}
-                    for r in results:
-                        if not r.get("refined", False):
-                            reason = r.get("refined_reason", "unknown")
-                            reasons[reason] = reasons.get(reason, 0) + 1
-                    qa_report["refined_fail_reasons"] = reasons
-                    
-                st.session_state.qa_report = qa_report
+                    for r in sorted_results[:10]
+                ]
+
+                reasons = {}
+                for r in song_rows:
+                    if not r.get("refined", False):
+                        reason = r.get("refined_reason", "unknown")
+                        reasons[reason] = reasons.get(reason, 0) + 1
+                qa_report["refined_fail_reasons"] = reasons
+                st.session_state["qa_report"] = qa_report
+            else:
+                st.session_state.pop("qa_report", None)
+
+        run_meta["completed"] = True
+        run_meta["finished_at"] = datetime.utcnow().isoformat() + "Z"
+        run_meta["clips_exported"] = len(results)
+        run_meta["manifest_path"] = st.session_state.get("manifest_path", "")
+        (run_scope_dir / "run_meta.json").write_text(json.dumps(run_meta, indent=2), encoding="utf-8")
     except Exception as e:
+        run_meta["completed"] = False
+        run_meta["finished_at"] = datetime.utcnow().isoformat() + "Z"
+        run_meta["error"] = f"{type(e).__name__}: {e}"
+        (run_scope_dir / "run_meta.json").write_text(json.dumps(run_meta, indent=2), encoding="utf-8")
+        (run_scope_dir / "diagnostics.json").write_text(
+            json.dumps({"run_id": run_id, "mode": mode_now, "error": run_meta["error"]}, indent=2),
+            encoding="utf-8",
+        )
         crash_log_path = run_scope_dir / "crash.log"
         crash_payload = (
             f"run_id={run_id}\n"
@@ -1145,6 +1123,17 @@ def _display_clip_card(r):
     with col2:
         if p.exists():
             st.audio(p.read_bytes())
+
+# Restore last manifest on rerun if in-memory results are missing
+if (not st.session_state.get("results")) and st.session_state.get("manifest_path"):
+    manifest_path = Path(st.session_state["manifest_path"])
+    if manifest_path.exists():
+        try:
+            restored_df = pd.read_csv(manifest_path)
+            restored_df = restored_df.where(pd.notna(restored_df), None)
+            st.session_state["results"] = restored_df.to_dict(orient="records")
+        except Exception:
+            pass
 
 # ----------------------------
 # Results Browser / Export
