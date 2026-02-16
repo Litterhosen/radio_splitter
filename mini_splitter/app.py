@@ -1,13 +1,14 @@
+# app.py
+import os
 import io
 import zipfile
 from pathlib import Path
-
 import streamlit as st
 
-from audio_utils import ensure_ffmpeg, probe_audio, save_uploaded_file, to_wav
+from audio_utils import ensure_ffmpeg, save_uploaded_file, probe_audio, to_wav
+from transcribe_fw import transcribe_faster_whisper
 from clipper import export_clips_from_segments
 from loops import export_bar_loops
-from transcribe_fw import transcribe_faster_whisper
 
 OUTPUT_ROOT = Path("output")
 OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
@@ -44,23 +45,21 @@ st.write("Upload audio (mp3/wav/m4a/flac). Output kommer som én zip.")
 uploaded = st.file_uploader("Audio file", type=["mp3", "wav", "m4a", "flac", "aac", "ogg"])
 run = st.button("Run")
 
-
 def zip_folder(folder: Path) -> bytes:
     buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        for path in folder.rglob("*"):
-            if path.is_file():
-                zf.write(path, path.relative_to(folder))
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        for p in folder.rglob("*"):
+            if p.is_file():
+                z.write(p, p.relative_to(folder))
     buf.seek(0)
     return buf.read()
-
 
 if run:
     if not uploaded:
         st.error("Upload en fil først.")
         st.stop()
 
-    job_id = Path(uploaded.name).stem
+    job_id = f"{Path(uploaded.name).stem}"
     out_dir = OUTPUT_ROOT / job_id
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -70,7 +69,7 @@ if run:
     info = probe_audio(src_path)
     st.info(f"Input: {info}")
 
-    # Keep two WAVs:
+    # We keep two WAVs:
     # - speech wav: 16k mono
     # - music wav: 44.1k stereo
     wav_speech = out_dir / "input_speech.wav"
@@ -80,6 +79,7 @@ if run:
 
     transcript = None
 
+    # 1) TRANSCRIBE
     if mode in ["All", "Transcribe", "Clips (Speech)"]:
         st.subheader("1) Transcribe")
         with st.spinner("Transcribing..."):
@@ -93,6 +93,7 @@ if run:
         st.success("Transcription done.")
         st.write(f"Segments: {len(transcript['segments'])}")
 
+    # 2) CLIPS FROM SEGMENTS
     if mode in ["All", "Clips (Speech)"]:
         if transcript is None:
             st.warning("Ingen transcript fundet (kør Transcribe eller All).")
@@ -112,12 +113,13 @@ if run:
                 )
             st.success("Clips exported.")
 
+    # 3) LOOPS
     if mode in ["All", "Loops (Music)"]:
         st.subheader("3) Export loops (music)")
         loops_dir = out_dir / "loops"
         loops_dir.mkdir(exist_ok=True)
 
-        hop = 1 if loop_hop == "every beat" else 4
+        hop = 1 if loop_hop == "every beat" else 4  # 4 beats = 1 bar
         with st.spinner("Analyzing beats + exporting loops..."):
             export_bar_loops(
                 wav_music,
@@ -131,10 +133,10 @@ if run:
         st.success("Loops exported.")
 
     st.subheader("Download")
-    zip_bytes = zip_folder(out_dir)
+    zbytes = zip_folder(out_dir)
     st.download_button(
         "Download ZIP",
-        data=zip_bytes,
+        data=zbytes,
         file_name=f"{job_id}_mini_splitter.zip",
         mime="application/zip",
     )
