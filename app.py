@@ -9,6 +9,7 @@ st.set_page_config(page_title=f"The Sample Machine v{VERSION}", layout="wide")
 import io
 import json
 import zipfile
+import traceback
 from pathlib import Path
 from typing import List, Dict, Any, Tuple, Optional
 from datetime import datetime
@@ -23,6 +24,7 @@ from audio_split import (
     cut_segment_to_wav,
     cut_segment_to_mp3,
     cut_segment_with_fades,
+    get_duration_seconds,
 )
 from transcribe import load_model, transcribe_wav
 from downloaders import download_audio, DownloadError
@@ -151,6 +153,10 @@ def detect_file_language(model, in_path: Path, session_dir: Path, forced_languag
     }
 
 
+SONG_HUNTER_LONG_FILE_LIMIT_MINUTES = 20.0
+SONG_HUNTER_LONG_FILE_LIMIT_SECONDS = SONG_HUNTER_LONG_FILE_LIMIT_MINUTES * 60.0
+
+
 # ----------------------------
 # UI - Title and Description
 # ----------------------------
@@ -172,6 +178,7 @@ st.sidebar.selectbox("Model size", ["tiny", "base", "small", "medium"], key="mod
 st.sidebar.selectbox("Language", ["Auto", "Dansk", "English"], key="whisper_language_ui")
 st.sidebar.selectbox("Device", ["cpu"], key="device")
 st.sidebar.selectbox("Compute type", ["int8", "float32"], key="compute_type")
+st.sidebar.checkbox("Debug mode (save crash trace)", key="debug_mode", value=True)
 
 # Export settings
 st.sidebar.subheader("📤 Export")
@@ -207,6 +214,7 @@ else:
     st.sidebar.slider("Preferred length (sec)", 2.0, 20.0, step=0.5, key="prefer_len")
     st.sidebar.slider("Scan hop (sec)", 0.25, 5.0, step=0.25, key="hook_hop")
     st.sidebar.slider("Top N hooks", 3, 30, step=1, key="hook_topn")
+    st.sidebar.checkbox(f"Allow long Song Hunter files (>{int(SONG_HUNTER_LONG_FILE_LIMIT_MINUTES)} min)", key="allow_long_song_hunter", value=False)
     st.sidebar.slider("Min gap between hooks (sec)", 0.0, 10.0, step=0.5, key="hook_gap")
     
     st.sidebar.subheader("🎼 Beat Refinement")
@@ -344,168 +352,216 @@ if load_btn:
 # ----------------------------
 if run_btn:
     mode_now = st.session_state["mode"]
-    
+    run_id = datetime.utcnow().strftime("%Y%m%d_%H%M%S") + "_" + uuid4().hex[:8]
+    run_scope_dir = ensure_dir(OUTPUT_ROOT / run_id)
+
     # Check if model is needed and loaded
     if st.session_state.model is None:
         st.warning("⚠️ Please click 'Load Whisper Model' first!")
         st.stop()
+
+    try:
+        with st.status("🚀 Starting processing...", expanded=True) as status:
+            results = []
+            st.session_state["source_artifacts"] = []
+            st.session_state["active_run_id"] = run_id
+            lang = get_whisper_language()
+            total_files = len(input_paths)
     
-    with st.status("🚀 Starting processing...", expanded=True) as status:
-        results = []
-        st.session_state["source_artifacts"] = []
-        run_id = datetime.utcnow().strftime("%Y%m%d_%H%M%S") + "_" + uuid4().hex[:8]
-        st.session_state["active_run_id"] = run_id
-        lang = get_whisper_language()
-        total_files = len(input_paths)
-
-        for idx_file, (src_type, name_or_path, maybe_bytes, youtube_info) in enumerate(input_paths):
-            status.update(
-                label=f"📦 Processing file {idx_file+1} of {total_files}",
-                state="running"
-            )
-            
-            st.write(f"### File {idx_file+1}/{total_files}: {name_or_path}")
-            
-            # Step 1: Save and convert to analysis format
-            in_path, session_dir, in_name, yt_info = save_input_to_session_dir(src_type, name_or_path, maybe_bytes, youtube_info, run_id=run_id)
-            
-            # Extract track metadata (artist, title, track_id)
-            track_artist, track_title, track_id = extract_track_metadata(in_path, yt_info)
-            st.write(f"🎵 Track: **{track_artist} - {track_title}**")
-            
-            st.write("⏳ Converting audio...")
-            wav16 = session_dir / "_analysis_16k_mono.wav"
-            ffmpeg_to_wav16k_mono(in_path, wav16)
-            st.write("✅ Conversion complete.")
-            
-            # Auto-detect audio type
-            st.write("🔍 Detecting audio type...")
-            audio_detection = detect_audio_type(wav16, sr=16000, duration=30.0)
-            st.write(f"🎯 **Audio Type:** {audio_detection['audio_type_guess']} (confidence: {audio_detection['audio_type_confidence']:.2f})")
-            st.write(f"💡 **Recommended Mode:** {audio_detection['recommended_mode']}")
-
-            language_meta = detect_file_language(
-                st.session_state.model,
-                in_path,
-                session_dir,
-                forced_language=lang,
-            )
-            st.write(
-                f"🗣️ File language: {language_meta['language_guess_file']} "
-                f"(confidence: {language_meta['language_confidence_file']:.2f}, policy: {language_meta['language_policy']})"
-            )
-            
-            # ----------------------------
-            # Mode: Song Hunter (Loops)
-            # ----------------------------
-            if mode_now == "🎵 Song Hunter (Loops)":
-                st.write("🎵 Finding hooks...")
-                
-                # Get prefer_bars from session state
-                prefer_bars = int(st.session_state.get("prefer_bars", 2))
-                beats_per_bar = int(st.session_state.get("beats_per_bar", 4))
-                
-                hooks, global_bpm, global_confidence = find_hooks(
-                    wav16,
-                    hook_len_range=(
-                        st.session_state["hook_len_range_min"],
-                        st.session_state["hook_len_range_max"]
-                    ),
-                    prefer_len=st.session_state["prefer_len"],
-                    hop_s=st.session_state["hook_hop"],
-                    topn=st.session_state["hook_topn"],
-                    min_gap_s=st.session_state["hook_gap"],
-                    prefer_bars=prefer_bars,
-                    beats_per_bar=beats_per_bar,
+            for idx_file, (src_type, name_or_path, maybe_bytes, youtube_info) in enumerate(input_paths):
+                status.update(
+                    label=f"📦 Processing file {idx_file+1} of {total_files}",
+                    state="running"
                 )
-                st.write(f"🎉 Found {len(hooks)} potential hooks!")
-                st.write(f"🎼 Global BPM: {global_bpm} (confidence: {global_confidence:.2f})")
                 
-                # Convert to candidate format
-                candidates = []
-                for h in hooks:
-                    candidates.append({
-                        "start": float(h.start),
-                        "end": float(h.end),
-                        "score": float(h.score),
-                        "hook_score": float(h.score),
-                        "energy": float(h.energy),
-                        "loopability": float(h.loopability),
-                        "bpm": float(h.bpm),
-                        "bpm_confidence": float(h.bpm_confidence),
-                        "bpm_source": h.bpm_source,
-                        "bpm_clip_confidence": float(h.bpm_clip_confidence),
-                    })
+                st.write(f"### File {idx_file+1}/{total_files}: {name_or_path}")
                 
-                # Apply minimum duration filter
-                min_duration = st.session_state["hook_len_range_min"]
-                candidates = filter_by_duration(candidates, min_duration=min_duration)
-                st.write(f"✂️ After {min_duration}s filter: {len(candidates)} hooks")
+                # Step 1: Save and convert to analysis format
+                in_path, session_dir, in_name, yt_info = save_input_to_session_dir(src_type, name_or_path, maybe_bytes, youtube_info, run_id=run_id)
                 
-                # Apply anti-overlap
-                candidates = anti_overlap_keep_best(candidates)
-                st.write(f"🔄 After anti-overlap: {len(candidates)} hooks")
+                # Extract track metadata (artist, title, track_id)
+                track_artist, track_title, track_id = extract_track_metadata(in_path, yt_info)
+                st.write(f"🎵 Track: **{track_artist} - {track_title}**")
+    
+                source_duration_sec = get_duration_seconds(in_path)
+                if mode_now == "🎵 Song Hunter (Loops)" and source_duration_sec > SONG_HUNTER_LONG_FILE_LIMIT_SECONDS and not st.session_state.get("allow_long_song_hunter", False):
+                    st.warning(
+                        f"⚠️ Song Hunter is disabled for files longer than {int(SONG_HUNTER_LONG_FILE_LIMIT_MINUTES)} minutes "
+                        f"({source_duration_sec/60.0:.1f} min detected). Use Broadcast mode, split input, or enable the long-file override in sidebar."
+                    )
+                    continue
+    
+                st.write("⏳ Converting audio...")
+                wav16 = session_dir / "_analysis_16k_mono.wav"
+                ffmpeg_to_wav16k_mono(in_path, wav16)
+                st.write("✅ Conversion complete.")
                 
-                # Process each hook
-                progress_bar = st.progress(0)
-                total_hooks = len(candidates)
+                # Auto-detect audio type
+                st.write("🔍 Detecting audio type...")
+                audio_detection = detect_audio_type(wav16, sr=16000, duration=30.0)
+                st.write(f"🎯 **Audio Type:** {audio_detection['audio_type_guess']} (confidence: {audio_detection['audio_type_confidence']:.2f})")
+                st.write(f"💡 **Recommended Mode:** {audio_detection['recommended_mode']}")
+    
+                language_meta = detect_file_language(
+                    st.session_state.model,
+                    in_path,
+                    session_dir,
+                    forced_language=lang,
+                )
+                st.write(
+                    f"🗣️ File language: {language_meta['language_guess_file']} "
+                    f"(confidence: {language_meta['language_confidence_file']:.2f}, policy: {language_meta['language_policy']})"
+                )
                 
+                # ----------------------------
+                # Mode: Song Hunter (Loops)
+                # ----------------------------
+                if mode_now == "🎵 Song Hunter (Loops)":
+                    st.write("🎵 Finding hooks...")
+                    
+                    # Get prefer_bars from session state
+                    prefer_bars = int(st.session_state.get("prefer_bars", 2))
+                    beats_per_bar = int(st.session_state.get("beats_per_bar", 4))
                 for idx, cand in enumerate(candidates, start=1):
                     progress_bar.progress(idx / total_hooks)
                     
-                    a, b = float(cand["start"]), float(cand["end"])
+                    hooks, global_bpm, global_confidence = find_hooks(
+                        wav16,
+                        hook_len_range=(
+                            st.session_state["hook_len_range_min"],
+                            st.session_state["hook_len_range_max"]
+                        ),
+                        prefer_len=st.session_state["prefer_len"],
+                        hop_s=st.session_state["hook_hop"],
+                        topn=st.session_state["hook_topn"],
+                        min_gap_s=st.session_state["hook_gap"],
+                        prefer_bars=prefer_bars,
+                        beats_per_bar=beats_per_bar,
+                    )
+                    st.write(f"🎉 Found {len(hooks)} potential hooks!")
+                    st.write(f"🎼 Global BPM: {global_bpm} (confidence: {global_confidence:.2f})")
                     
-                    # Beat refinement
-                    a2, b2, bpm_refined, bars, rscore, refined_ok, rreason, bars_est, bpm_conf = maybe_refine_barloop(wav16, a, b)
-                    aa, bb = (a2, b2) if refined_ok else (a, b)
-                    dur = max(0.0, bb - aa)
+                    # Convert to candidate format
+                    candidates = []
+                    for h in hooks:
+                        candidates.append({
+                            "start": float(h.start),
+                            "end": float(h.end),
+                            "score": float(h.score),
+                            "hook_score": float(h.score),
+                            "energy": float(h.energy),
+                            "loopability": float(h.loopability),
+                            "bpm": float(h.bpm),
+                            "bpm_confidence": float(h.bpm_confidence),
+                            "bpm_source": h.bpm_source,
+                            "bpm_clip_confidence": float(h.bpm_clip_confidence),
+                        })
                     
-                    # FIX: Don't override refinement based on min_duration
-                    # The prefer_bars setting should control clip length, not a hard minimum
-                    # Only reject clips that are genuinely too short (< MIN_CLIP_DURATION_SECONDS)
-                    if refined_ok and dur < MIN_CLIP_DURATION_SECONDS:
-                        # Clip is too short even after refinement - fall back to original
-                        aa, bb = a, b
+                    # Apply minimum duration filter
+                    min_duration = st.session_state["hook_len_range_min"]
+                    candidates = filter_by_duration(candidates, min_duration=min_duration)
+                    st.write(f"✂️ After {min_duration}s filter: {len(candidates)} hooks")
+                    
+                    # Apply anti-overlap
+                    candidates = anti_overlap_keep_best(candidates)
+                    st.write(f"🔄 After anti-overlap: {len(candidates)} hooks")
+                    
+                    # Process each hook
+                    progress_bar = st.progress(0)
+                    total_hooks = len(candidates)
+                    
+                    for idx, cand in enumerate(candidates, start=1):
+                        progress_bar.progress(idx / total_hooks)
+                        
+                        a, b = float(cand["start"]), float(cand["end"])
+                        
+                        # Beat refinement
+                        a2, b2, bpm_refined, bars, rscore, refined_ok, rreason, bars_est, bpm_conf = maybe_refine_barloop(wav16, a, b)
+                        aa, bb = (a2, b2) if refined_ok else (a, b)
                         dur = max(0.0, bb - aa)
-                        refined_ok = False
-                        # Keep the original reason from refinement (likely "too_short" from beat_refine.py)
-                    
-                    # Get preference for bar snapping
-                    prefer_bars = int(st.session_state.get("prefer_bars", 2))
-                    
-                    # Determine BPM and bars with proper tracking
-                    bpm_clip = int(cand.get("bpm", global_bpm))
-                    bpm_clip_confidence = cand.get("bpm_clip_confidence", 0.0)
-                    
-                    if refined_ok:
-                        # Refined: use beat-grid aligned values
-                        bpm_used = bpm_refined
-                        bpm_used_source = "refined_grid"
-                        raw_bars_estimate = bars_est  # Raw estimate before grid alignment
-                        bars_used = bars  # Grid-aligned bars
-                        final_bpm_conf = bpm_conf
-                        refined_reason = ""
-                    else:
-                        # Not refined: use estimates with snapping
-                        # Calculate raw bars estimate
-                        if bars_est > 0:
-                            raw_bars_estimate = bars_est
+                        
+                        # FIX: Don't override refinement based on min_duration
+                        # The prefer_bars setting should control clip length, not a hard minimum
+                        # Only reject clips that are genuinely too short (< MIN_CLIP_DURATION_SECONDS)
+                        if refined_ok and dur < MIN_CLIP_DURATION_SECONDS:
+                            # Clip is too short even after refinement - fall back to original
+                            aa, bb = a, b
+                            dur = max(0.0, bb - aa)
+                            refined_ok = False
+                            # Keep the original reason from refinement (likely "too_short" from beat_refine.py)
+                        
+                        # Get preference for bar snapping
+                        prefer_bars = int(st.session_state.get("prefer_bars", 2))
+                        
+                        # Determine BPM and bars with proper tracking
+                        bpm_clip = int(cand.get("bpm", global_bpm))
+                        bpm_clip_confidence = cand.get("bpm_clip_confidence", 0.0)
+                        
+                        if refined_ok:
+                            # Refined: use beat-grid aligned values
+                            bpm_used = bpm_refined
+                            bpm_used_source = "refined_grid"
+                            raw_bars_estimate = bars_est  # Raw estimate before grid alignment
+                            bars_used = bars  # Grid-aligned bars
+                            final_bpm_conf = bpm_conf
+                            refined_reason = ""
                         else:
-                            raw_bars_estimate = estimate_bars_from_duration(dur, bpm_clip, 4)
+                            # Not refined: use estimates with snapping
+                            # Calculate raw bars estimate
+                            if bars_est > 0:
+                                raw_bars_estimate = bars_est
+                            else:
+                                raw_bars_estimate = estimate_bars_from_duration(dur, bpm_clip, 4)
+                            
+                            # Snap bars to valid values
+                            bars_used = snap_bars_to_valid(raw_bars_estimate, prefer_bars, tolerance=0.25)
+                            
+                            # Determine BPM to use: prefer global if high confidence
+                            if cand.get("bpm_source") == "track_global":
+                                bpm_used = bpm_clip  # Already normalized to global
+                                bpm_used_source = "global_snapped"
+                                final_bpm_conf = cand.get("bpm_confidence", global_confidence)
+                            else:
+                                bpm_used = bpm_clip
+                                bpm_used_source = "segment_estimate"
+                                final_bpm_conf = bpm_clip_confidence
+                            
+                            # Use the reason from refinement attempt (disabled, too_short, no_onsets, etc.)
+                            refined_reason = rreason
                         
-                        # Snap bars to valid values
-                        bars_used = snap_bars_to_valid(raw_bars_estimate, prefer_bars, tolerance=0.25)
+                        # Generate UID
+                        uid = clip_uid(in_name, aa, bb, idx)
                         
-                        # Determine BPM to use: prefer global if high confidence
-                        if cand.get("bpm_source") == "track_global":
-                            bpm_used = bpm_clip  # Already normalized to global
-                            bpm_used_source = "global_snapped"
-                            final_bpm_conf = cand.get("bpm_confidence", global_confidence)
-                        else:
-                            bpm_used = bpm_clip
-                            bpm_used_source = "segment_estimate"
-                            final_bpm_conf = bpm_clip_confidence
+                        # Transcribe
+                        temp_wav = session_dir / f"temp_{idx:04d}__whisper.wav"
+                        cut_segment_to_wav(in_path, temp_wav, aa, bb)
+                        tjson = transcribe_wav(st.session_state.model, temp_wav, language=lang)
+                        text = (tjson.get("text") or "").strip()
                         
+                        # Extract language info for this clip
+                        clip_lang_info = extract_language_info(tjson)
+                        clip_language = resolve_clip_language(
+                            language_meta["language_guess_file"],
+                            language_meta["language_confidence_file"],
+                            clip_lang_info,
+                            text,
+                        )
+                        
+                        # Generate text signature for grouping
+                        text_signature = normalize_text_for_signature(text, max_words=10)
+                        
+                        # Generate slug (max 24 chars, use __noslug if empty)
+                        slug = ""
+                        if st.session_state["use_slug"] and text:
+                            slug = safe_slug(" ".join(text.split()[:int(st.session_state["slug_words"])]), max_len=MAX_SLUG_LENGTH)
+                        
+                        # Filename format: {artist}-{title}__{idx}__{bpm}bpm__{bars}bar__{slug}__{uid6}.mp3
+                        # NO timestamps in main identifier per spec requirement
+                        
+                        # Build BPM/bars parts
+                        if refined_ok:
+                            bpm_part = f"{bpm_used}bpm"
+                            bars_part = f"{bars_used}bar"
                         # Use the reason from refinement attempt (disabled, too_short, no_onsets, etc.)
                         refined_reason = rreason
                     
@@ -546,58 +602,271 @@ if run_btn:
                         if final_bpm_conf < 0.4:
                             bpm_part = f"{bpm_used}bpm_low"
                         else:
-                            bpm_part = f"{bpm_used}bpm_est"
-                        bars_part = f"{bars_used}bar_est"
-                    
-                    # slug_part
-                    slug_part = slug if slug else "noslug"
-                    
-                    # Build complete filename stem (NO timestamps)
-                    # Format: {artist}-{title}__{idx}__{bpm}bpm__{bars}bar__{slug}__{uid6}
-                    # Max length enforcement (see MAX_FILENAME_LENGTH and MAX_STEM_LENGTH constants)
-                    stem = f"{track_artist}-{track_title}__{idx:04d}__{bpm_part}__{bars_part}__{slug_part}__{uid}"
-                    
-                    # Enforce max length
-                    if len(stem) > MAX_STEM_LENGTH:
-                        # Truncate the slug part first, then title if needed
-                        excess = len(stem) - max_stem_len
-                        if len(slug_part) > 10:
-                            slug_part = slug_part[:max(4, len(slug_part) - excess)]
-                            stem = f"{track_artist}-{track_title}__{idx:04d}__{bpm_part}__{bars_part}__{slug_part}__{uid}"
+                            if final_bpm_conf < 0.4:
+                                bpm_part = f"{bpm_used}bpm_low"
+                            else:
+                                bpm_part = f"{bpm_used}bpm_est"
+                            bars_part = f"{bars_used}bar_est"
+                        
+                        # slug_part
+                        slug_part = slug if slug else "noslug"
+                        
+                        # Build complete filename stem (NO timestamps)
+                        # Format: {artist}-{title}__{idx}__{bpm}bpm__{bars}bar__{slug}__{uid6}
+                        # Max length enforcement (see MAX_FILENAME_LENGTH and MAX_STEM_LENGTH constants)
+                        stem = f"{track_artist}-{track_title}__{idx:04d}__{bpm_part}__{bars_part}__{slug_part}__{uid}"
+                        
+                        # Enforce max length
                         if len(stem) > MAX_STEM_LENGTH:
-                            # Still too long, truncate title
-                            title_len = len(track_title)
+                            # Truncate the slug part first, then title if needed
                             excess = len(stem) - MAX_STEM_LENGTH
-                            track_title_trunc = track_title[:max(10, title_len - excess)]
-                            stem = f"{track_artist}-{track_title_trunc}__{idx:04d}__{bpm_part}__{bars_part}__{slug_part}__{uid}"
+                            if len(slug_part) > 10:
+                                slug_part = slug_part[:max(4, len(slug_part) - excess)]
+                                stem = f"{track_artist}-{track_title}__{idx:04d}__{bpm_part}__{bars_part}__{slug_part}__{uid}"
+                            if len(stem) > MAX_STEM_LENGTH:
+                                # Still too long, truncate title
+                                title_len = len(track_title)
+                                excess = len(stem) - MAX_STEM_LENGTH
+                                track_title_trunc = track_title[:max(10, title_len - excess)]
+                                stem = f"{track_artist}-{track_title_trunc}__{idx:04d}__{bpm_part}__{bars_part}__{slug_part}__{uid}"
+                        
+                        # Export with tail
+                        clip_path, export_meta = export_clip_with_tail(
+                            in_path, session_dir, stem, aa, bb,
+                            st.session_state["export_format"],
+                            add_tail=True,
+                            add_fades=True
+                        )
+                        
+                        # Save metadata
+                        txt_path = session_dir / f"{stem}.txt"
+                        json_path = session_dir / f"{stem}.json"
+                        txt_path.write_text((text or "") + "\n", encoding="utf-8")
+                        json_path.write_text(
+                            json.dumps(tjson, ensure_ascii=False, indent=2),
+                            encoding="utf-8"
+                        )
+                        
+                        # Tags and themes
+                        tags = ["musik", "hook"]
+                        if bars_used is not None:
+                            tags.append(f"{bars_used}bar")
+                        if not refined_ok:
+                            tags.append("unrefined")
+                        if text:
+                            tags = list(set(tags + auto_tags(text)))
+                        themes = detect_themes(text)
+                        
+                        results.append({
+                            "source": in_name,
+                            "filename": clip_path.name,
+                            "filename_stem": stem,
+                            "filename_template_version": "v2",
+                            "track_artist": track_artist,
+                            "track_title": track_title,
+                            "track_id": track_id,
+                            "session_dir": str(session_dir.name),
+                            "pick": True,
+                            "clip": idx,
+                            "start_sec": aa,
+                            "end_sec": bb,
+                            "dur_sec": dur,
+                            "core_start_sec": export_meta["core_start_sec"],
+                            "core_end_sec": export_meta["core_end_sec"],
+                            "core_dur_sec": export_meta["core_dur_sec"],
+                            "export_start_sec": export_meta["export_start_sec"],
+                            "export_end_sec": export_meta["export_end_sec"],
+                            "export_dur_sec": export_meta["export_dur_sec"],
+                            "pre_roll_ms": export_meta["pre_roll_ms"],
+                            "fade_in_ms": export_meta["fade_in_ms"],
+                            "fade_out_ms": export_meta["fade_out_ms"],
+                            "tail_sec": export_meta["tail_sec"],
+                            "zero_cross_applied": export_meta["zero_cross_applied"],
+                            "bpm_global": global_bpm,
+                            "bpm_global_confidence": round(global_confidence, 2),
+                            "bpm_clip": bpm_clip,
+                            "bpm_clip_confidence": round(bpm_clip_confidence, 2),
+                            "bpm_used": bpm_used,
+                            "bpm_used_source": bpm_used_source,
+                            "bars_requested": prefer_bars,
+                            "bars_policy": "prefer_bars",
+                            "beats_per_bar": beats_per_bar,
+                            "bars_estimated": raw_bars_estimate,
+                            "bars_used": bars_used,
+                            "bars_used_source": "refined_grid" if refined_ok else "estimated",
+                            "refined": bool(refined_ok),
+                            "refined_reason": refined_reason,
+                            "tags": ", ".join(sorted(tags)),
+                            "themes": ", ".join(themes),
+                            "hook_score": cand.get("hook_score", 0.0),
+                            "energy": cand.get("energy", 0.0),
+                            "loopability": cand.get("loopability", 0.0),
+                            "clip_path": str(clip_path),
+                            "txt": str(txt_path),
+                            "json": str(json_path),
+                            "text": text[:240] if text else "",
+                            "transcript_full_txt_path": "",
+                            "transcript_full_json_path": "",
+                            "language_detected": clip_language.get("language_guess", "unknown"),
+                            "language_guess_file": language_meta["language_guess_file"],
+                            "language_confidence_file": language_meta["language_confidence_file"],
+                            "language_guess_clip": clip_language.get("language_guess", "unknown"),
+                            "language_confidence_clip": clip_language.get("language_confidence", 0.0),
+                            "language_source_clip": clip_language.get("language_source", "file"),
+                            "language_policy": language_meta["language_policy"],
+                            "language_forced": language_meta["language_forced"],
+                            "audio_type_guess": audio_detection.get("audio_type_guess", "unknown"),
+                            "audio_type_confidence": audio_detection.get("audio_type_confidence", 0.0),
+                            "recommended_mode": audio_detection.get("recommended_mode", ""),
+                            "clip_text_signature": text_signature,
+                            "transcribe_model": st.session_state["model_size"],
+                            "split_method_used": "hook",
+                            "chunking_enabled": False,
+                        })
                     
-                    # Export with tail
-                    clip_path, export_meta = export_clip_with_tail(
-                        in_path, session_dir, stem, aa, bb,
-                        st.session_state["export_format"],
-                        add_tail=True,
-                        add_fades=True
+                    progress_bar.empty()
+                
+                # ----------------------------
+                # Mode: Broadcast Hunter (Mix)
+                # ----------------------------
+                else:
+                    from broadcast_splitter import detect_broadcast_segments
+    
+                    st.write("📻 Segmenting with VAD-first...")
+                    intervals, split_method_used, chunking_enabled = detect_broadcast_segments(
+                        wav16,
+                        min_segment_sec=1.5,
+                        max_segment_sec=float(st.session_state["max_segment_s"]),
+                        merge_gap_sec=float(st.session_state["merge_gap_s"]),
+                        chunk_sec=float(st.session_state["broadcast_chunk_s"]),
+                        silence_noise_db=st.session_state["noise_db"],
+                        silence_min_s=st.session_state["min_silence_s"],
+                        silence_pad_s=st.session_state["pad_s"],
+                        prefer_method="vad" if st.session_state["broadcast_split_method"].startswith("VAD") else "energy",
                     )
-                    
-                    # Save metadata
-                    txt_path = session_dir / f"{stem}.txt"
-                    json_path = session_dir / f"{stem}.json"
-                    txt_path.write_text((text or "") + "\n", encoding="utf-8")
-                    json_path.write_text(
-                        json.dumps(tjson, ensure_ascii=False, indent=2),
-                        encoding="utf-8"
-                    )
-                    
-                    # Tags and themes
-                    tags = ["musik", "hook"]
-                    if bars_used is not None:
-                        tags.append(f"{bars_used}bar")
-                    if not refined_ok:
-                        tags.append("unrefined")
-                    if text:
-                        tags = list(set(tags + auto_tags(text)))
-                    themes = detect_themes(text)
-                    
+    
+                    st.write(f"✂️ Found {len(intervals)} segments via **{split_method_used}** (chunking={chunking_enabled})")
+    
+                    progress_bar = st.progress(0)
+                    total_int = len(intervals)
+                    source_rows = []
+                    full_transcript_segments = []
+    
+                    for idx, (a, b) in enumerate(intervals, start=1):
+                        progress_bar.progress(idx / max(total_int, 1))
+    
+                        a, b = float(a), float(b)
+                        dur = max(0.0, b - a)
+    
+                        temp_wav = session_dir / f"temp_{idx:04d}__whisper.wav"
+                        cut_segment_to_wav(in_path, temp_wav, a, b)
+                        t = transcribe_wav(st.session_state.model, temp_wav, language=lang)
+                        text = (t.get("text") or "").strip()
+                        # Extract language info for this clip
+                        clip_lang_info = extract_language_info(t)
+                        clip_language = resolve_clip_language(
+                            language_meta["language_guess_file"],
+                            language_meta["language_confidence_file"],
+                            clip_lang_info,
+                            text,
+                        )
+                        
+                        # Generate text signature for grouping
+                        text_signature = normalize_text_for_signature(text, max_words=10)
+    
+                        for seg in t.get("segments", []):
+                            full_transcript_segments.append({
+                                "start": float(a) + float(seg.get("start", 0.0)),
+                                "end": float(a) + float(seg.get("end", 0.0)),
+                                "text": (seg.get("text") or "").strip(),
+                            })
+    
+                        slug = ""
+                        if st.session_state["use_slug"] and text:
+                            slug = safe_slug(" ".join(text.split()[:int(st.session_state["slug_words"])]), max_len=MAX_SLUG_LENGTH)
+    
+                        uid = clip_uid(in_name, a, b, idx)
+                        start_mmss = mmss(a)
+                        end_mmss = mmss(b)
+                        slug_part = slug if slug else "noslug"
+                        stem = f"{track_artist} - {track_title}__{idx:04d}__{start_mmss}-{end_mmss}__{slug_part}__{uid}"
+    
+                        clip_path, export_meta = export_clip_with_tail(
+                            in_path, session_dir, stem, a, b,
+                            st.session_state["export_format"],
+                            add_tail=False,
+                            add_fades=False
+                        )
+    
+                        txt_path = session_dir / f"{stem}.txt"
+                        json_path = session_dir / f"{stem}.json"
+                        txt_path.write_text(text + "\n", encoding="utf-8")
+                        json_path.write_text(json.dumps(t, ensure_ascii=False, indent=2), encoding="utf-8")
+    
+                        tags = auto_tags(text)
+                        score = float(jingle_score(text, dur))
+                        themes = detect_themes(text)
+    
+                        source_rows.append({
+                            "source": in_name,
+                            "filename": clip_path.name,
+                            "filename_stem": stem,
+                            "filename_template_version": "v2",
+                            "track_artist": track_artist,
+                            "track_title": track_title,
+                            "track_id": track_id,
+                            "session_dir": str(session_dir.name),
+                            "pick": True,
+                            "clip": idx,
+                            "start_sec": a,
+                            "end_sec": b,
+                            "dur_sec": dur,
+                            "core_start_sec": export_meta["core_start_sec"],
+                            "core_end_sec": export_meta["core_end_sec"],
+                            "core_dur_sec": export_meta["core_dur_sec"],
+                            "export_start_sec": export_meta["export_start_sec"],
+                            "export_end_sec": export_meta["export_end_sec"],
+                            "export_dur_sec": export_meta["export_dur_sec"],
+                            "pre_roll_ms": export_meta["pre_roll_ms"],
+                            "fade_in_ms": export_meta["fade_in_ms"],
+                            "fade_out_ms": export_meta["fade_out_ms"],
+                            "tail_sec": export_meta["tail_sec"],
+                            "zero_cross_applied": export_meta["zero_cross_applied"],
+                            "bpm_global": 0,
+                            "bpm_global_confidence": 0.0,
+                            "bpm_clip": 0,
+                            "bpm_clip_confidence": 0.0,
+                            "bpm_used": 0,
+                            "bpm_used_source": "unknown",
+                            "bars_estimated": 0,
+                            "bars_used": None,
+                            "bars_used_source": "unknown",
+                            "refined": False,
+                            "refined_reason": "",
+                            "tags": ", ".join(tags),
+                            "themes": ", ".join(themes),
+                            "jingle_score": score,
+                            "clip_path": str(clip_path),
+                            "txt": str(txt_path),
+                            "json": str(json_path),
+                            "text": text[:240] if text else "",
+                            "transcript_full_txt_path": "",
+                            "transcript_full_json_path": "",
+                            "language_detected": clip_language.get("language_guess", "unknown"),
+                            "language_guess_file": language_meta["language_guess_file"],
+                            "language_confidence_file": language_meta["language_confidence_file"],
+                            "language_guess_clip": clip_language.get("language_guess", "unknown"),
+                            "language_confidence_clip": clip_language.get("language_confidence", 0.0),
+                            "language_source_clip": clip_language.get("language_source", "file"),
+                            "language_policy": language_meta["language_policy"],
+                            "language_forced": language_meta["language_forced"],
+                            "audio_type_guess": audio_detection.get("audio_type_guess", "unknown"),
+                            "audio_type_confidence": audio_detection.get("audio_type_confidence", 0.0),
+                            "recommended_mode": audio_detection.get("recommended_mode", ""),
+                            "clip_text_signature": text_signature,
+                            "transcribe_model": st.session_state["model_size"],
+                            "split_method_used": "vad",
+                            "chunking_enabled": False,
                     results.append({
                         "source": in_name,
                         "filename": clip_path.name,
@@ -721,23 +990,36 @@ if run_btn:
                             "end": float(a) + float(seg.get("end", 0.0)),
                             "text": (seg.get("text") or "").strip(),
                         })
-
-                    slug = ""
-                    if st.session_state["use_slug"] and text:
-                        slug = safe_slug(" ".join(text.split()[:int(st.session_state["slug_words"])]), max_len=MAX_SLUG_LENGTH)
-
-                    uid = clip_uid(in_name, a, b, idx)
-                    start_mmss = mmss(a)
-                    end_mmss = mmss(b)
-                    slug_part = slug if slug else "noslug"
-                    stem = f"{track_artist} - {track_title}__{idx:04d}__{start_mmss}-{end_mmss}__{slug_part}__{uid}"
-
-                    clip_path, export_meta = export_clip_with_tail(
-                        in_path, session_dir, stem, a, b,
-                        st.session_state["export_format"],
-                        add_tail=False,
-                        add_fades=False
+    
+                    progress_bar.empty()
+    
+                    full_transcript_segments = sorted(full_transcript_segments, key=lambda x: x["start"])
+                    transcript_txt_path = session_dir / "transcript_full.txt"
+                    transcript_json_path = session_dir / "transcript_full.json"
+    
+                    transcript_lines = [
+                        f"[{hhmmss_ms(seg['start'])}] {seg['text']}" for seg in full_transcript_segments if seg.get("text")
+                    ]
+                    transcript_txt_path.write_text("\n".join(transcript_lines) + ("\n" if transcript_lines else ""), encoding="utf-8")
+                    transcript_json_path.write_text(
+                        json.dumps({
+                            "source": in_name,
+                            "language_detected": language_meta["language_guess_file"],
+                            "language_confidence_file": language_meta["language_confidence_file"],
+                            "language_policy": language_meta["language_policy"],
+                            "language_forced": language_meta["language_forced"],
+                            "transcribe_model": st.session_state["model_size"],
+                            "segments": full_transcript_segments,
+                        }, ensure_ascii=False, indent=2),
+                        encoding="utf-8",
                     )
+    
+                    source_artifact = {
+                        "source": in_name,
+                        "audio_path": str(in_path),
+                        "session_dir": str(session_dir),
+                        "transcript_full_txt_path": str(transcript_txt_path),
+                        "transcript_full_json_path": str(transcript_json_path),
 
                     txt_path = session_dir / f"{stem}.txt"
                     json_path = session_dir / f"{stem}.json"
@@ -828,7 +1110,22 @@ if run_btn:
                         "language_policy": language_meta["language_policy"],
                         "language_forced": language_meta["language_forced"],
                         "transcribe_model": st.session_state["model_size"],
+                        "split_method_used": split_method_used,
+                        "chunking_enabled": bool(chunking_enabled),
                         "segments": full_transcript_segments,
+                    }
+                    st.session_state.setdefault("source_artifacts", []).append(source_artifact)
+    
+                    for row in source_rows:
+                        row["transcript_full_txt_path"] = str(transcript_txt_path)
+                        row["transcript_full_json_path"] = str(transcript_json_path)
+                        row["language_policy"] = language_meta["language_policy"]
+                        row["language_forced"] = language_meta["language_forced"]
+                        row["transcribe_model"] = st.session_state["model_size"]
+                        row["split_method_used"] = split_method_used
+                        row["chunking_enabled"] = bool(chunking_enabled)
+    
+                    results.extend(source_rows)
                     }, ensure_ascii=False, indent=2),
                     encoding="utf-8",
                 )
@@ -871,44 +1168,74 @@ if run_btn:
             st.balloons()
             st.success(f"🎉 Finished! Found {len(results)} clips. Scroll down to preview.")
             
-            # Generate QA Report for Song Hunter mode
-            if mode_now == "🎵 Song Hunter (Loops)":
-                qa_report = {
-                    "total_clips": len(results),
-                    "refined_ok": sum(1 for r in results if r.get("refined", False)),
-                    "refined_fail": sum(1 for r in results if not r.get("refined", False)),
-                    "global_bpm": global_bpm if 'global_bpm' in locals() else 0,
-                    "global_confidence": round(global_confidence, 2) if 'global_confidence' in locals() else 0.0,
-                }
+            st.session_state.results = results
+            
+            if not results:
+                status.update(label="⚠️ No clips found", state="error")
+                st.error("No clips found with current settings. Try adjusting parameters.")
+            else:
+                status.update(label=f"✅ Success! Found {len(results)} clips", state="complete")
+                st.balloons()
+                st.success(f"🎉 Finished! Found {len(results)} clips. Scroll down to preview.")
                 
-                # BPM statistics
-                bpms = [r.get("bpm_used", 0) for r in results if r.get("bpm_used", 0) > 0]
-                if bpms:
-                    qa_report["bpm_min"] = min(bpms)
-                    qa_report["bpm_max"] = max(bpms)
-                    qa_report["bpm_median"] = int(pd.Series(bpms).median())
-                
-                # Top hooks by score
-                sorted_results = sorted(results, key=lambda r: r.get("hook_score", 0), reverse=True)
-                qa_report["top_hooks"] = [
-                    {
-                        "clip": r.get("clip"),
-                        "score": round(r.get("hook_score", 0), 2),
-                        "bpm": r.get("bpm_used"),
-                        "bars": r.get("bars_used"),
+                # Generate QA Report for Song Hunter mode
+                if mode_now == "🎵 Song Hunter (Loops)":
+                    qa_report = {
+                        "total_clips": len(results),
+                        "refined_ok": sum(1 for r in results if r.get("refined", False)),
+                        "refined_fail": sum(1 for r in results if not r.get("refined", False)),
+                        "global_bpm": global_bpm if 'global_bpm' in locals() else 0,
+                        "global_confidence": round(global_confidence, 2) if 'global_confidence' in locals() else 0.0,
                     }
-                    for r in sorted_results[:10]
-                ]
-                
-                # Refined fail reasons breakdown
-                reasons = {}
-                for r in results:
-                    if not r.get("refined", False):
-                        reason = r.get("refined_reason", "unknown")
-                        reasons[reason] = reasons.get(reason, 0) + 1
-                qa_report["refined_fail_reasons"] = reasons
-                
+                    
+                    # BPM statistics
+                    bpms = [r.get("bpm_used", 0) for r in results if r.get("bpm_used", 0) > 0]
+                    if bpms:
+                        qa_report["bpm_min"] = min(bpms)
+                        qa_report["bpm_max"] = max(bpms)
+                        qa_report["bpm_median"] = int(pd.Series(bpms).median())
+                    
+                    # Top hooks by score
+                    sorted_results = sorted(results, key=lambda r: r.get("hook_score", 0), reverse=True)
+                    qa_report["top_hooks"] = [
+                        {
+                            "clip": r.get("clip"),
+                            "score": round(r.get("hook_score", 0), 2),
+                            "bpm": r.get("bpm_used"),
+                            "bars": r.get("bars_used"),
+                        }
+                        for r in sorted_results[:10]
+                    ]
+                    
+                    # Refined fail reasons breakdown
+                    reasons = {}
+                    for r in results:
+                        if not r.get("refined", False):
+                            reason = r.get("refined_reason", "unknown")
+                            reasons[reason] = reasons.get(reason, 0) + 1
+                    qa_report["refined_fail_reasons"] = reasons
+                    
                 st.session_state.qa_report = qa_report
+    except Exception as e:
+        crash_log_path = run_scope_dir / "crash.log"
+        crash_payload = (
+            f"run_id={run_id}\n"
+            f"mode={mode_now}\n"
+            f"error={type(e).__name__}: {e}\n\n"
+            f"traceback:\n{traceback.format_exc()}"
+        )
+        crash_log_path.write_text(crash_payload, encoding="utf-8")
+        st.error("❌ Run failed, see crash.log")
+        st.download_button(
+            "⬇️ Download crash.log",
+            data=crash_payload.encode("utf-8"),
+            file_name=f"{run_id}_crash.log",
+            mime="text/plain",
+            use_container_width=True,
+        )
+        if st.session_state.get("debug_mode", False):
+            st.exception(e)
+
 
 # ----------------------------
 # Helper function for displaying clip cards
