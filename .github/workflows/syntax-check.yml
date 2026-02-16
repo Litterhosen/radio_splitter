@@ -1,0 +1,25 @@
+name: Python Syntax Check
+
+on:
+  push:
+    branches: [ "**" ]
+  pull_request:
+    branches: [ "**" ]
+
+jobs:
+  syntax-check:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+    
+    - name: Check Python syntax
+      run: |
+        echo "Checking Python syntax for all .py files..."
+        python -m py_compile $(git ls-files '*.py')
+        echo "✅ All Python files have valid syntax!"
