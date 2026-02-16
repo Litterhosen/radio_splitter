@@ -161,3 +161,28 @@ def export_clip_with_tail(
             "zero_cross_applied": False,
         }
         return outp, export_meta
+
+
+def build_groups(selected_rows: List[Dict[str, Any]], group_mode: str) -> Optional[Dict[str, List[Dict[str, Any]]]]:
+    """Build grouped rows for preview rendering."""
+    if group_mode == "none":
+        return None
+
+    groups: Dict[str, List[Dict[str, Any]]] = {}
+
+    for row in selected_rows:
+        if group_mode == "phrase":
+            key = row.get("clip_text_signature", "") or "[No text]"
+        elif group_mode == "tag_theme":
+            tags = str(row.get("tags", "")).split(", ")
+            themes = str(row.get("themes", "")).split(", ")
+            combined = [t.strip() for t in (tags + themes) if t.strip()]
+            key = ", ".join(combined[:3]) if combined else "[No tags]"
+        elif group_mode == "language":
+            key = row.get("language_guess_clip", row.get("language_detected", "unknown"))
+        else:
+            return None
+
+        groups.setdefault(key, []).append(row)
+
+    return groups

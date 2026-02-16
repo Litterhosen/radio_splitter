@@ -202,6 +202,57 @@ def normalize_text_for_signature(text: str, max_words: int = 10) -> str:
     return " ".join(words)
 
 
+
+
+def merge_language_votes(votes: list[Dict[str, Any]]) -> Dict[str, Any]:
+    """Majority vote for file-level language from multiple language observations."""
+    normalized = []
+    for vote in votes:
+        lang = (vote or {}).get("language_guess", "unknown")
+        conf = float((vote or {}).get("language_confidence", 0.0) or 0.0)
+        if lang in {"da", "en"}:
+            normalized.append((lang, conf))
+
+    if not normalized:
+        return {"language_guess": "unknown", "language_confidence": 0.0}
+
+    counts: Dict[str, int] = {}
+    conf_totals: Dict[str, float] = {}
+    for lang, conf in normalized:
+        counts[lang] = counts.get(lang, 0) + 1
+        conf_totals[lang] = conf_totals.get(lang, 0.0) + conf
+
+    best_lang = sorted(counts.items(), key=lambda kv: (-kv[1], -conf_totals.get(kv[0], 0.0), kv[0]))[0][0]
+    best_count = counts[best_lang]
+    avg_conf = conf_totals[best_lang] / max(best_count, 1)
+    majority_factor = best_count / len(normalized)
+
+    return {
+        "language_guess": best_lang,
+        "language_confidence": round(min(0.99, avg_conf * majority_factor), 3),
+    }
+
+
+def resolve_clip_language(
+    file_language_guess: str,
+    file_language_confidence: float,
+    clip_language_info: Dict[str, Any],
+    clip_text: str,
+    min_chars: int = 20,
+    high_confidence: float = 0.85,
+) -> Dict[str, Any]:
+    """Choose clip language, defaulting to file language for short/low-confidence clips."""
+    clip_guess = (clip_language_info or {}).get("language_guess", "unknown")
+    clip_conf = float((clip_language_info or {}).get("language_confidence", 0.0) or 0.0)
+    has_enough_text = len((clip_text or "").strip()) >= int(min_chars)
+    use_clip_language = clip_guess in {"da", "en"} and (has_enough_text or clip_conf >= float(high_confidence))
+
+    if use_clip_language:
+        return {"language_guess": clip_guess, "language_confidence": round(clip_conf, 3), "language_source": "clip"}
+
+    file_guess = file_language_guess if file_language_guess in {"da", "en"} else "unknown"
+    file_conf = float(file_language_confidence or 0.0)
+    return {"language_guess": file_guess, "language_confidence": round(file_conf, 3), "language_source": "file"}
 def extract_language_info(transcribe_result: Dict[str, Any]) -> Dict[str, Any]:
     """
     Extract language detection info from Whisper transcription result.
