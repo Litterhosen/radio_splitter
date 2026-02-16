@@ -422,8 +422,6 @@ if run_btn:
                     # Get prefer_bars from session state
                     prefer_bars = int(st.session_state.get("prefer_bars", 2))
                     beats_per_bar = int(st.session_state.get("beats_per_bar", 4))
-                for idx, cand in enumerate(candidates, start=1):
-                    progress_bar.progress(idx / total_hooks)
                     
                     hooks, global_bpm, global_confidence = find_hooks(
                         wav16,
