@@ -157,6 +157,30 @@ SONG_HUNTER_LONG_FILE_LIMIT_MINUTES = 20.0
 SONG_HUNTER_LONG_FILE_LIMIT_SECONDS = SONG_HUNTER_LONG_FILE_LIMIT_MINUTES * 60.0
 
 
+def _broadcast_diagnostics_template() -> Dict[str, int]:
+    return {
+        "segments_total": 0,
+        "segments_too_short": 0,
+        "segments_too_quiet": 0,
+        "segments_transcribe_failed": 0,
+        "segments_transcript_empty": 0,
+        "segments_exported": 0,
+    }
+
+
+def _quick_scan_windows(duration_sec: float, window_sec: float) -> List[Tuple[float, float, str]]:
+    if duration_sec <= 0:
+        return []
+    ws = min(window_sec, duration_sec)
+    starts = [0.0, max(0.0, duration_sec / 2.0 - ws / 2.0), max(0.0, duration_sec - ws)]
+    labels = ["start", "middle", "end"]
+    windows = []
+    for start, label in zip(starts, labels):
+        end = min(duration_sec, start + ws)
+        windows.append((start, end, label))
+    return windows
+
+
 # ----------------------------
 # UI - Title and Description
 # ----------------------------
@@ -198,6 +222,7 @@ if st.session_state["mode"] == "📻 Broadcast Hunter (Mix)":
     st.sidebar.slider("Max segment (sec)", 10.0, 120.0, step=1.0, key="max_segment_s")
     st.sidebar.slider("Merge gap (sec)", 0.1, 1.0, step=0.05, key="merge_gap_s")
     st.sidebar.slider("Chunk size (sec)", 300.0, 900.0, step=60.0, key="broadcast_chunk_s")
+    st.sidebar.checkbox("Export without transcript", key="export_without_transcript")
     with st.sidebar.expander("Silence fallback tuning", expanded=False):
         st.slider("Silence threshold (dB)", -60.0, -10.0, step=1.0, key="noise_db")
         st.slider("Min silence (sec)", 0.2, 2.0, step=0.1, key="min_silence_s")
@@ -335,6 +360,15 @@ with col1:
 with col2:
     run_btn = st.button("▶️ Process", type="primary", disabled=not input_paths, use_container_width=True)
 
+quick_scan_btn = False
+if st.session_state["mode"] == "📻 Broadcast Hunter (Mix)":
+    quick_scan_btn = st.button(
+        "⚡ Quick Scan (recommended for long files)",
+        type="secondary",
+        disabled=not input_paths,
+        use_container_width=True,
+    )
+
 if load_btn:
     try:
         with st.spinner("Loading model... (first time downloads it)"):
@@ -347,10 +381,68 @@ if load_btn:
     except Exception as e:
         st.error(f"❌ Could not load model: {e}")
 
+if quick_scan_btn:
+    if st.session_state.model is None:
+        st.warning("⚠️ Please click 'Load Whisper Model' first!")
+    else:
+        from broadcast_splitter import detect_broadcast_segments
+
+        st.session_state["quick_scan_ready_for_full_run"] = True
+        run_id = datetime.utcnow().strftime("%Y%m%d_%H%M%S") + "_" + uuid4().hex[:8]
+        run_scope_dir = ensure_dir(OUTPUT_ROOT / run_id)
+        lang = get_whisper_language()
+        rows = []
+        for src_type, name_or_path, maybe_bytes, youtube_info in input_paths:
+            in_path, session_dir, in_name, yt_info = save_input_to_session_dir(src_type, name_or_path, maybe_bytes, youtube_info, run_id=run_id)
+            wav16 = session_dir / "_analysis_16k_mono.wav"
+            ffmpeg_to_wav16k_mono(in_path, wav16)
+            track_artist, track_title, _ = extract_track_metadata(in_path, yt_info)
+            duration_sec = get_duration_seconds(in_path)
+            for w_start, w_end, w_label in _quick_scan_windows(duration_sec, float(st.session_state.get("quick_scan_window_sec", 75.0))):
+                window_wav = session_dir / f"_quick_scan_{w_label}.wav"
+                cut_segment_to_wav(in_path, window_wav, w_start, w_end)
+                intervals, method_used, _ = detect_broadcast_segments(
+                    window_wav,
+                    min_segment_sec=1.5,
+                    max_segment_sec=float(st.session_state["max_segment_s"]),
+                    merge_gap_sec=float(st.session_state["merge_gap_s"]),
+                    chunk_sec=99999.0,
+                    silence_noise_db=st.session_state["noise_db"],
+                    silence_min_s=st.session_state["min_silence_s"],
+                    silence_pad_s=st.session_state["pad_s"],
+                    prefer_method="vad" if st.session_state["broadcast_split_method"].startswith("VAD") else "energy",
+                )
+                nonempty = 0
+                guesses = []
+                for a, b in intervals:
+                    probe_wav = session_dir / f"_quick_scan_probe_{w_label}_{int(a*1000)}.wav"
+                    cut_segment_to_wav(window_wav, probe_wav, float(a), float(b))
+                    t = transcribe_wav(st.session_state.model, probe_wav, language=lang)
+                    txt = (t.get("text") or "").strip()
+                    if txt:
+                        nonempty += 1
+                    guesses.append(extract_language_info(t).get("language_guess", "unknown"))
+                seg_per_min = (len(intervals) / max((w_end - w_start) / 60.0, 1e-9)) if (w_end - w_start) > 0 else 0.0
+                rows.append({
+                    "source": f"{track_artist} - {track_title}",
+                    "window": w_label,
+                    "method_used": method_used,
+                    "segments": len(intervals),
+                    "segments/min": round(seg_per_min, 2),
+                    "transcript_nonempty_pct": round((nonempty / max(len(intervals), 1)) * 100.0, 1),
+                    "language_guess": max(set(guesses), key=guesses.count) if guesses else "unknown",
+                    "estimated_total_clips": int(round(seg_per_min * (duration_sec / 60.0))),
+                })
+        if rows:
+            st.subheader("Quick Scan Report")
+            st.dataframe(pd.DataFrame(rows), use_container_width=True)
+            if st.button("Proceed with Full Run", key="quick_scan_full_run_hint"):
+                st.session_state["quick_scan_proceed"] = True
+
 # ----------------------------
 # Processing Logic
 # ----------------------------
-if run_btn:
+if run_btn or st.session_state.pop("quick_scan_proceed", False):
     mode_now = st.session_state["mode"]
     run_id = datetime.utcnow().strftime("%Y%m%d_%H%M%S") + "_" + uuid4().hex[:8]
     run_scope_dir = ensure_dir(OUTPUT_ROOT / run_id)
@@ -729,145 +821,199 @@ if run_btn:
                 # ----------------------------
                 else:
                     from broadcast_splitter import detect_broadcast_segments
-    
-                    st.write("📻 Segmenting with VAD-first...")
-                    intervals, split_method_used, chunking_enabled = detect_broadcast_segments(
-                        wav16,
-                        min_segment_sec=1.5,
-                        max_segment_sec=float(st.session_state["max_segment_s"]),
-                        merge_gap_sec=float(st.session_state["merge_gap_s"]),
-                        chunk_sec=float(st.session_state["broadcast_chunk_s"]),
-                        silence_noise_db=st.session_state["noise_db"],
-                        silence_min_s=st.session_state["min_silence_s"],
-                        silence_pad_s=st.session_state["pad_s"],
-                        prefer_method="vad" if st.session_state["broadcast_split_method"].startswith("VAD") else "energy",
-                    )
-    
-                    st.write(f"✂️ Found {len(intervals)} segments via **{split_method_used}** (chunking={chunking_enabled})")
-    
-                    progress_bar = st.progress(0)
-                    total_int = len(intervals)
-                    source_rows = []
-                    full_transcript_segments = []
-    
-                    for idx, (a, b) in enumerate(intervals, start=1):
-                        progress_bar.progress(idx / max(total_int, 1))
-    
-                        a, b = float(a), float(b)
-                        dur = max(0.0, b - a)
-    
-                        temp_wav = session_dir / f"temp_{idx:04d}__whisper.wav"
-                        cut_segment_to_wav(in_path, temp_wav, a, b)
-                        t = transcribe_wav(st.session_state.model, temp_wav, language=lang)
-                        text = (t.get("text") or "").strip()
-                        # Extract language info for this clip
-                        clip_lang_info = extract_language_info(t)
-                        clip_language = resolve_clip_language(
-                            language_meta["language_guess_file"],
-                            language_meta["language_confidence_file"],
-                            clip_lang_info,
-                            text,
+
+                    export_without_transcript = bool(st.session_state.get("export_without_transcript", True))
+                    min_segment_sec = 1.5
+                    max_segment_sec = float(st.session_state["max_segment_s"])
+                    merge_gap_sec = float(st.session_state["merge_gap_s"])
+                    prefer_method = "vad" if st.session_state["broadcast_split_method"].startswith("VAD") else "energy"
+
+                    def _run_broadcast_pass(pass_name: str, min_seg: float, max_seg: float, quiet_filter_enabled: bool, retry_used: bool = False):
+                        st.write(f"📻 Segmenting ({pass_name})...")
+                        intervals, split_method_used, chunking_enabled = detect_broadcast_segments(
+                            wav16,
+                            min_segment_sec=min_seg,
+                            max_segment_sec=max_seg,
+                            merge_gap_sec=merge_gap_sec,
+                            chunk_sec=float(st.session_state["broadcast_chunk_s"]),
+                            silence_noise_db=st.session_state["noise_db"],
+                            silence_min_s=st.session_state["min_silence_s"],
+                            silence_pad_s=st.session_state["pad_s"],
+                            prefer_method=prefer_method,
                         )
-                        
-                        # Generate text signature for grouping
-                        text_signature = normalize_text_for_signature(text, max_words=10)
-    
-                        for seg in t.get("segments", []):
-                            full_transcript_segments.append({
-                                "start": float(a) + float(seg.get("start", 0.0)),
-                                "end": float(a) + float(seg.get("end", 0.0)),
-                                "text": (seg.get("text") or "").strip(),
+                        st.write(f"✂️ Found {len(intervals)} segments via **{split_method_used}** (chunking={chunking_enabled})")
+
+                        diagnostics = _broadcast_diagnostics_template()
+                        diagnostics["segments_total"] = len(intervals)
+                        progress_bar = st.progress(0)
+                        source_rows = []
+
+                        for idx, (a, b) in enumerate(intervals, start=1):
+                            progress_bar.progress(idx / max(len(intervals), 1))
+                            a, b = float(a), float(b)
+                            dur = max(0.0, b - a)
+                            if dur < min_seg:
+                                diagnostics["segments_too_short"] += 1
+                                continue
+
+                            temp_wav = session_dir / f"temp_{pass_name}_{idx:04d}__whisper.wav"
+                            cut_segment_to_wav(in_path, temp_wav, a, b)
+
+                            t = {}
+                            try:
+                                t = transcribe_wav(st.session_state.model, temp_wav, language=lang)
+                            except Exception:
+                                diagnostics["segments_transcribe_failed"] += 1
+
+                            text = (t.get("text") or "").strip() if isinstance(t, dict) else ""
+                            if not text:
+                                diagnostics["segments_transcript_empty"] += 1
+                                if not export_without_transcript:
+                                    continue
+
+                            if quiet_filter_enabled and not text:
+                                diagnostics["segments_too_quiet"] += 1
+                                continue
+
+                            clip_lang_info = extract_language_info(t) if isinstance(t, dict) else {}
+                            clip_language = resolve_clip_language(
+                                language_meta["language_guess_file"],
+                                language_meta["language_confidence_file"],
+                                clip_lang_info,
+                                text,
+                            )
+                            text_signature = normalize_text_for_signature(text, max_words=10)
+                            slug = ""
+                            if st.session_state["use_slug"] and text:
+                                slug = safe_slug(" ".join(text.split()[:int(st.session_state["slug_words"])]), max_len=MAX_SLUG_LENGTH)
+
+                            uid = clip_uid(in_name, a, b, idx)
+                            stem = f"{track_artist} - {track_title}__{idx:04d}__{mmss(a)}-{mmss(b)}__{(slug if slug else 'noslug')}__{uid}"
+                            clip_path, export_meta = export_clip_with_tail(
+                                in_path, session_dir, stem, a, b,
+                                st.session_state["export_format"],
+                                add_tail=False,
+                                add_fades=False,
+                            )
+                            txt_path = session_dir / f"{stem}.txt"
+                            json_path = session_dir / f"{stem}.json"
+                            txt_path.write_text((text or "") + "\n", encoding="utf-8")
+                            json_path.write_text(json.dumps(t if isinstance(t, dict) else {}, ensure_ascii=False, indent=2), encoding="utf-8")
+
+                            tags = auto_tags(text)
+                            score = float(jingle_score(text, dur))
+                            themes = detect_themes(text)
+                            diagnostics["segments_exported"] += 1
+                            source_rows.append({
+                                "source": in_name,
+                                "filename": clip_path.name,
+                                "filename_stem": stem,
+                                "filename_template_version": "v2",
+                                "track_artist": track_artist,
+                                "track_title": track_title,
+                                "track_id": track_id,
+                                "session_dir": str(session_dir.name),
+                                "pick": True,
+                                "clip": idx,
+                                "start_sec": a,
+                                "end_sec": b,
+                                "dur_sec": dur,
+                                "core_start_sec": export_meta["core_start_sec"],
+                                "core_end_sec": export_meta["core_end_sec"],
+                                "core_dur_sec": export_meta["core_dur_sec"],
+                                "export_start_sec": export_meta["export_start_sec"],
+                                "export_end_sec": export_meta["export_end_sec"],
+                                "export_dur_sec": export_meta["export_dur_sec"],
+                                "pre_roll_ms": export_meta["pre_roll_ms"],
+                                "fade_in_ms": export_meta["fade_in_ms"],
+                                "fade_out_ms": export_meta["fade_out_ms"],
+                                "tail_sec": export_meta["tail_sec"],
+                                "zero_cross_applied": export_meta["zero_cross_applied"],
+                                "bpm_global": 0,
+                                "bpm_global_confidence": 0.0,
+                                "bpm_clip": 0,
+                                "bpm_clip_confidence": 0.0,
+                                "bpm_used": 0,
+                                "bpm_used_source": "unknown",
+                                "bars_estimated": 0,
+                                "bars_used": None,
+                                "bars_used_source": "unknown",
+                                "refined": False,
+                                "refined_reason": "",
+                                "tags": ", ".join(tags),
+                                "themes": ", ".join(themes),
+                                "jingle_score": score,
+                                "clip_path": str(clip_path),
+                                "txt": str(txt_path),
+                                "json": str(json_path),
+                                "text": text[:240] if text else "",
+                                "transcript_full_txt_path": "",
+                                "transcript_full_json_path": "",
+                                "language_detected": clip_language.get("language_guess", "unknown"),
+                                "language_guess_file": language_meta["language_guess_file"],
+                                "language_confidence_file": language_meta["language_confidence_file"],
+                                "language_guess_clip": clip_language.get("language_guess", "unknown"),
+                                "language_confidence_clip": clip_language.get("language_confidence", 0.0),
+                                "language_source_clip": clip_language.get("language_source", "file"),
+                                "language_policy": language_meta["language_policy"],
+                                "language_forced": language_meta["language_forced"],
+                                "audio_type_guess": audio_detection.get("audio_type_guess", "unknown"),
+                                "audio_type_confidence": audio_detection.get("audio_type_confidence", 0.0),
+                                "recommended_mode": audio_detection.get("recommended_mode", ""),
+                                "clip_text_signature": text_signature,
+                                "transcribe_model": st.session_state["model_size"],
+                                "split_method_used": split_method_used,
+                                "chunking_enabled": chunking_enabled,
+                                "retry_used": retry_used,
                             })
-    
-                        slug = ""
-                        if st.session_state["use_slug"] and text:
-                            slug = safe_slug(" ".join(text.split()[:int(st.session_state["slug_words"])]), max_len=MAX_SLUG_LENGTH)
-    
-                        uid = clip_uid(in_name, a, b, idx)
-                        start_mmss = mmss(a)
-                        end_mmss = mmss(b)
-                        slug_part = slug if slug else "noslug"
-                        stem = f"{track_artist} - {track_title}__{idx:04d}__{start_mmss}-{end_mmss}__{slug_part}__{uid}"
-    
-                        clip_path, export_meta = export_clip_with_tail(
-                            in_path, session_dir, stem, a, b,
-                            st.session_state["export_format"],
-                            add_tail=False,
-                            add_fades=False
+                        progress_bar.empty()
+                        return source_rows, diagnostics, split_method_used
+
+                    source_rows, broadcast_diag, split_method_used = _run_broadcast_pass(
+                        "primary",
+                        min_seg=min_segment_sec,
+                        max_seg=max_segment_sec,
+                        quiet_filter_enabled=False,
+                        retry_used=False,
+                    )
+
+                    if split_method_used == "energy" and broadcast_diag["segments_exported"] == 0 and broadcast_diag["segments_total"] > 0:
+                        st.warning("No clips exported on energy pass. Retrying once with relaxed thresholds...")
+                        relaxed_min = max(0.8, min_segment_sec * 0.7)
+                        relaxed_max = min(90.0, max_segment_sec * 1.3)
+                        source_rows, broadcast_diag, split_method_used = _run_broadcast_pass(
+                            "retry",
+                            min_seg=relaxed_min,
+                            max_seg=relaxed_max,
+                            quiet_filter_enabled=False,
+                            retry_used=True,
                         )
-    
-                        txt_path = session_dir / f"{stem}.txt"
-                        json_path = session_dir / f"{stem}.json"
-                        txt_path.write_text(text + "\n", encoding="utf-8")
-                        json_path.write_text(json.dumps(t, ensure_ascii=False, indent=2), encoding="utf-8")
-    
-                        tags = auto_tags(text)
-                        score = float(jingle_score(text, dur))
-                        themes = detect_themes(text)
-    
-                        source_rows.append({
-                            "source": in_name,
-                            "filename": clip_path.name,
-                            "filename_stem": stem,
-                            "filename_template_version": "v2",
-                            "track_artist": track_artist,
-                            "track_title": track_title,
-                            "track_id": track_id,
-                            "session_dir": str(session_dir.name),
-                            "pick": True,
-                            "clip": idx,
-                            "start_sec": a,
-                            "end_sec": b,
-                            "dur_sec": dur,
-                            "core_start_sec": export_meta["core_start_sec"],
-                            "core_end_sec": export_meta["core_end_sec"],
-                            "core_dur_sec": export_meta["core_dur_sec"],
-                            "export_start_sec": export_meta["export_start_sec"],
-                            "export_end_sec": export_meta["export_end_sec"],
-                            "export_dur_sec": export_meta["export_dur_sec"],
-                            "pre_roll_ms": export_meta["pre_roll_ms"],
-                            "fade_in_ms": export_meta["fade_in_ms"],
-                            "fade_out_ms": export_meta["fade_out_ms"],
-                            "tail_sec": export_meta["tail_sec"],
-                            "zero_cross_applied": export_meta["zero_cross_applied"],
-                            "bpm_global": 0,
-                            "bpm_global_confidence": 0.0,
-                            "bpm_clip": 0,
-                            "bpm_clip_confidence": 0.0,
-                            "bpm_used": 0,
-                            "bpm_used_source": "unknown",
-                            "bars_estimated": 0,
-                            "bars_used": None,
-                            "bars_used_source": "unknown",
-                            "refined": False,
-                            "refined_reason": "",
-                            "tags": ", ".join(tags),
-                            "themes": ", ".join(themes),
-                            "jingle_score": score,
-                            "clip_path": str(clip_path),
-                            "txt": str(txt_path),
-                            "json": str(json_path),
-                            "text": text[:240] if text else "",
-                            "transcript_full_txt_path": "",
-                            "transcript_full_json_path": "",
-                            "language_detected": clip_language.get("language_guess", "unknown"),
-                            "language_guess_file": language_meta["language_guess_file"],
-                            "language_confidence_file": language_meta["language_confidence_file"],
-                            "language_guess_clip": clip_language.get("language_guess", "unknown"),
-                            "language_confidence_clip": clip_language.get("language_confidence", 0.0),
-                            "language_source_clip": clip_language.get("language_source", "file"),
-                            "language_policy": language_meta["language_policy"],
-                            "language_forced": language_meta["language_forced"],
-                            "audio_type_guess": audio_detection.get("audio_type_guess", "unknown"),
-                            "audio_type_confidence": audio_detection.get("audio_type_confidence", 0.0),
-                            "recommended_mode": audio_detection.get("recommended_mode", ""),
-                            "clip_text_signature": text_signature,
-                            "transcribe_model": st.session_state["model_size"],
-                            "split_method_used": "vad",
-                            "chunking_enabled": False,
-                        })
-                
-                progress_bar.empty()
+
+                    if broadcast_diag["segments_total"] > 0 and broadcast_diag["segments_exported"] == 0:
+                        st.error("0 clips exported")
+                        diag_df = pd.DataFrame([{"metric": k, "value": v} for k, v in broadcast_diag.items()])
+                        st.dataframe(diag_df, use_container_width=True)
+                        (session_dir / "diagnostics.json").write_text(
+                            json.dumps({"diagnostics": broadcast_diag, "split_method_used": split_method_used}, indent=2),
+                            encoding="utf-8",
+                        )
+                        if st.button("Retry with relaxed thresholds", key=f"retry_relaxed_{idx_file}"):
+                            relaxed_min = max(0.8, min_segment_sec * 0.7)
+                            relaxed_max = min(90.0, max_segment_sec * 1.3)
+                            source_rows, broadcast_diag, split_method_used = _run_broadcast_pass(
+                                "manual_retry",
+                                min_seg=relaxed_min,
+                                max_seg=relaxed_max,
+                                quiet_filter_enabled=False,
+                                retry_used=True,
+                            )
+                            (session_dir / "diagnostics.json").write_text(
+                                json.dumps({"diagnostics": broadcast_diag, "split_method_used": split_method_used}, indent=2),
+                                encoding="utf-8",
+                            )
+
+                    results.extend(source_rows)
+
             
         
         st.session_state.results = results

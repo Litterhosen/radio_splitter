@@ -51,6 +51,8 @@ DEFAULTS: Dict[str, Any] = {
     "merge_gap_s": 0.35,
     "broadcast_chunk_s": 600.0,
     "broadcast_split_method": "VAD-first (recommended)",
+    "export_without_transcript": True,
+    "quick_scan_window_sec": 75.0,
     "fixed_len": 8.0,
     "hook_len_range_min": 4.0,
     "hook_len_range_max": 15.0,
