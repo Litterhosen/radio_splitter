@@ -1,0 +1,65 @@
+import subprocess
+from pathlib import Path
+
+
+def export_clips_from_segments(
+    wav_path: Path,
+    segments: list[dict],
+    out_dir: Path,
+    min_clip_sec: float,
+    pad_sec: float,
+    fade_ms: int,
+    export_format: str = "wav",
+) -> None:
+    """
+    Exports each segment as a separate file.
+    Uses ffmpeg, adds optional pad and short fades to avoid clicks.
+    """
+    for idx, seg in enumerate(segments, start=1):
+        start = max(0.0, seg["start"] - pad_sec)
+        end = seg["end"] + pad_sec
+        duration = end - start
+        if duration < min_clip_sec:
+            continue
+
+        out_path = out_dir / f"clip_{idx:04d}.{export_format}"
+        text = _slug(seg.get("text", ""), max_len=48)
+        if text:
+            out_path = out_dir / f"clip_{idx:04d}_{text}.{export_format}"
+
+        fade_seconds = fade_ms / 1000.0
+        afade = []
+        if fade_ms > 0:
+            afade = [
+                "-af",
+                f"afade=t=in:st=0:d={fade_seconds},afade=t=out:st={max(0.0, duration - fade_seconds)}:d={fade_seconds}",
+            ]
+
+        cmd = [
+            "ffmpeg",
+            "-y",
+            "-ss",
+            str(start),
+            "-to",
+            str(end),
+            "-i",
+            str(wav_path),
+            "-vn",
+            *afade,
+            str(out_path),
+        ]
+        subprocess.run(cmd, check=True, capture_output=True)
+
+
+def _slug(text: str, max_len: int = 48) -> str:
+    text = text.strip().lower()
+    keep = []
+    for ch in text:
+        if ch.isalnum():
+            keep.append(ch)
+        elif ch in [" ", "_", "-"]:
+            keep.append("_")
+    out = "".join(keep)
+    while "__" in out:
+        out = out.replace("__", "_")
+    return out[:max_len].strip("_")
