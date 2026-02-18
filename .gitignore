@@ -9,3 +9,5 @@ crash_test/results/
 *.wav
 *.mp3
 app_old.py
+cleanup_log*.txt
+migration_log*.txt

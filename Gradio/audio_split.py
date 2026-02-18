@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Tuple, Optional
 
-from utils import find_ffmpeg, find_ffprobe, run_cmd
+from rs_utils import find_ffmpeg, find_ffprobe, run_cmd
 
 
 @dataclass

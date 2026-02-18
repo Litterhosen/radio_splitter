@@ -2,7 +2,7 @@
 Audio type detection and classification for radio_splitter.
 Uses librosa and rule-based heuristics for lightweight detection.
 """
-from typing import Dict, Any, Tuple
+from typing import Dict, Any, Tuple, List, Optional
 from pathlib import Path
 import numpy as np
 
@@ -13,172 +13,329 @@ except ImportError:
     LIBROSA_AVAILABLE = False
 
 
-def detect_audio_type(audio_path: Path, sr: int = 16000, duration: float = 30.0) -> Dict[str, Any]:
+def _safe_tempo_scalar(tempo: Any) -> float:
+    """librosa may return tempo as scalar or ndarray depending on version."""
+    if hasattr(tempo, "__len__"):
+        return float(tempo[0]) if len(tempo) > 0 else 0.0
+    try:
+        return float(tempo)
+    except Exception:
+        return 0.0
+
+
+def _window_starts(total_duration: float, window_duration: float, max_windows: int = 3) -> List[float]:
+    """Choose start/middle/end windows for robust file-level voting."""
+    if total_duration <= 0:
+        return [0.0]
+    wd = max(4.0, min(window_duration, total_duration))
+    if total_duration <= wd + 0.25:
+        return [0.0]
+    if max_windows <= 1:
+        return [0.0]
+
+    starts = [0.0, max(0.0, total_duration / 2.0 - wd / 2.0), max(0.0, total_duration - wd)]
+    deduped = []
+    for s in starts:
+        if all(abs(s - prev) > 1.0 for prev in deduped):
+            deduped.append(float(s))
+    return deduped[:max_windows]
+
+
+def detect_audio_type(
+    audio_path: Path,
+    sr: int = 16000,
+    duration: float = 30.0,
+    known_duration_sec: Optional[float] = None,
+) -> Dict[str, Any]:
     """
-    Detect audio type (music/speech/mixed/jingle_ad/unknown) using lightweight heuristics.
-    
-    Args:
-        audio_path: Path to audio file
-        sr: Sample rate for analysis
-        duration: Maximum duration to analyze (seconds) for efficiency
-    
-    Returns:
-        Dict with:
-            - audio_type_guess: str (music | speech | mixed | jingle_ad | unknown)
-            - audio_type_confidence: float (0..1)
-            - recommended_mode: str (Song Hunter | Broadcast Hunter)
+    Detect audio type (music/speech/mixed/jingle_ad/unknown) with multi-window voting.
     """
     if not LIBROSA_AVAILABLE:
         return {
             "audio_type_guess": "unknown",
             "audio_type_confidence": 0.0,
-            "recommended_mode": "Song Hunter | Broadcast Hunter"
+            "recommended_mode": "Song Hunter | Broadcast Hunter",
+            "analysis_windows": 0,
         }
-    
+
     try:
-        # Load audio snippet for analysis
-        y, sr_loaded = librosa.load(str(audio_path), sr=sr, duration=duration, mono=True)
-        
-        # Extract features
-        features = _extract_audio_features(y, sr_loaded)
-        
-        # Classify based on features
-        audio_type, confidence = _classify_audio_type(features)
-        
-        # Recommend mode
-        recommended_mode = _recommend_mode(audio_type, confidence)
-        
+        if known_duration_sec is not None and float(known_duration_sec) > 0:
+            total_duration = float(known_duration_sec)
+        else:
+            try:
+                total_duration = float(librosa.get_duration(path=str(audio_path)))
+            except TypeError:
+                # librosa<0.10 uses "filename" instead of "path"
+                total_duration = float(librosa.get_duration(filename=str(audio_path)))
+            except Exception:
+                total_duration = 0.0
+
+        if total_duration <= 0.0:
+            # Last-resort fallback to avoid long-track misclassification.
+            try:
+                y_full, sr_full = librosa.load(str(audio_path), sr=sr, mono=True)
+                total_duration = len(y_full) / float(sr_full) if sr_full else 0.0
+            except Exception:
+                total_duration = 0.0
+
+        window_duration = float(duration if duration > 0 else 20.0)
+        if total_duration > 0:
+            window_duration = min(window_duration, total_duration)
+        window_duration = max(8.0, window_duration)
+
+        starts = _window_starts(total_duration, window_duration, max_windows=3)
+        votes = []
+        for start in starts:
+            y, sr_loaded = librosa.load(
+                str(audio_path),
+                sr=sr,
+                offset=max(0.0, float(start)),
+                duration=window_duration,
+                mono=True,
+            )
+            clip_duration = len(y) / float(sr_loaded) if sr_loaded else 0.0
+            if clip_duration < 2.0:
+                continue
+
+            features = _extract_audio_features(y, sr_loaded)
+            audio_type, confidence, scores = _classify_audio_type(
+                features,
+                clip_duration=clip_duration,
+                full_duration=(total_duration if total_duration > 0 else clip_duration),
+            )
+            votes.append(
+                {
+                    "audio_type_guess": audio_type,
+                    "audio_type_confidence": float(confidence),
+                    "scores": scores,
+                }
+            )
+
+        if not votes:
+            return {
+                "audio_type_guess": "unknown",
+                "audio_type_confidence": 0.0,
+                "recommended_mode": "Song Hunter | Broadcast Hunter",
+                "analysis_windows": 0,
+            }
+
+        merged = _merge_window_votes(votes, total_duration=total_duration)
+        audio_type = merged["audio_type_guess"]
+        confidence = merged["audio_type_confidence"]
         return {
             "audio_type_guess": audio_type,
             "audio_type_confidence": round(confidence, 3),
-            "recommended_mode": recommended_mode
+            "recommended_mode": _recommend_mode(audio_type, confidence),
+            "analysis_windows": len(votes),
+            "duration_sec_used": round(float(total_duration), 2) if total_duration > 0 else 0.0,
         }
-    
+
     except Exception as e:
-        # Log error for debugging
         import sys
+
         print(f"Warning: Audio detection failed: {e}", file=sys.stderr)
-        # Fallback on error
         return {
             "audio_type_guess": "unknown",
             "audio_type_confidence": 0.0,
-            "recommended_mode": "Song Hunter | Broadcast Hunter"
+            "recommended_mode": "Song Hunter | Broadcast Hunter",
+            "analysis_windows": 0,
         }
+
+
+def _merge_window_votes(votes: List[Dict[str, Any]], total_duration: float) -> Dict[str, Any]:
+    weighted: Dict[str, float] = {}
+    for vote in votes:
+        typ = str(vote.get("audio_type_guess", "unknown"))
+        conf = max(0.05, float(vote.get("audio_type_confidence", 0.0) or 0.0))
+        weighted[typ] = weighted.get(typ, 0.0) + conf
+
+    if not weighted:
+        return {"audio_type_guess": "unknown", "audio_type_confidence": 0.0}
+
+    total_weight = sum(weighted.values()) or 1.0
+    best_type = max(weighted.items(), key=lambda kv: kv[1])[0]
+    best_conf = weighted[best_type] / total_weight
+
+    # Guardrail: long tracks should almost never be classified as jingle/ad.
+    if best_type == "jingle_ad" and total_duration >= 120.0:
+        music_w = weighted.get("music", 0.0)
+        mixed_w = weighted.get("mixed", 0.0)
+        speech_w = weighted.get("speech", 0.0)
+        if speech_w >= max(music_w, mixed_w):
+            best_type = "speech"
+            best_conf = max(speech_w / total_weight if total_weight > 0 else 0.0, 0.55)
+        elif music_w >= mixed_w * 1.15:
+            best_type = "music"
+            base_conf = music_w / total_weight if total_weight > 0 else 0.0
+            best_conf = max(base_conf, 0.55)
+        else:
+            best_type = "mixed"
+            best_conf = max(mixed_w / total_weight if total_weight > 0 else 0.0, 0.55)
+
+    return {
+        "audio_type_guess": best_type,
+        "audio_type_confidence": float(max(0.0, min(0.99, best_conf))),
+    }
 
 
 def _extract_audio_features(y: np.ndarray, sr: int) -> Dict[str, float]:
     """Extract relevant audio features for classification."""
-    features = {}
-    
+    features: Dict[str, float] = {}
+
     # Spectral features
     spectral_centroids = librosa.feature.spectral_centroid(y=y, sr=sr)[0]
-    features['spectral_centroid_mean'] = float(np.mean(spectral_centroids))
-    features['spectral_centroid_std'] = float(np.std(spectral_centroids))
-    
+    features["spectral_centroid_mean"] = float(np.mean(spectral_centroids))
+    features["spectral_centroid_std"] = float(np.std(spectral_centroids))
+
     # Zero crossing rate (speech tends to have higher ZCR)
     zcr = librosa.feature.zero_crossing_rate(y)[0]
-    features['zcr_mean'] = float(np.mean(zcr))
-    features['zcr_std'] = float(np.std(zcr))
-    
+    features["zcr_mean"] = float(np.mean(zcr))
+    features["zcr_std"] = float(np.std(zcr))
+
     # Tempo/beat strength (music tends to have stronger beat)
     try:
         tempo, beats = librosa.beat.beat_track(y=y, sr=sr)
-        features['tempo'] = float(tempo) if tempo else 0.0
-        features['beat_strength'] = float(len(beats) / (len(y) / sr)) if len(beats) > 0 else 0.0
-    except Exception as e:
-        features['tempo'] = 0.0
-        features['beat_strength'] = 0.0
-    
+        tempo_val = _safe_tempo_scalar(tempo)
+        clip_dur = max(len(y) / float(sr), 1e-6)
+        features["tempo"] = tempo_val
+        features["beat_strength"] = float(len(beats) / clip_dur) if len(beats) > 0 else 0.0
+    except Exception:
+        features["tempo"] = 0.0
+        features["beat_strength"] = 0.0
+
     # RMS energy variation
     rms = librosa.feature.rms(y=y)[0]
-    features['rms_mean'] = float(np.mean(rms))
-    features['rms_std'] = float(np.std(rms))
-    features['rms_variation'] = features['rms_std'] / (features['rms_mean'] + 1e-8)
-    
+    features["rms_mean"] = float(np.mean(rms))
+    features["rms_std"] = float(np.std(rms))
+    features["rms_variation"] = features["rms_std"] / (features["rms_mean"] + 1e-8)
+
     # Spectral rolloff (frequency distribution)
     rolloff = librosa.feature.spectral_rolloff(y=y, sr=sr)[0]
-    features['spectral_rolloff_mean'] = float(np.mean(rolloff))
-    
+    features["spectral_rolloff_mean"] = float(np.mean(rolloff))
+
+    flatness = librosa.feature.spectral_flatness(y=y)[0]
+    features["spectral_flatness_mean"] = float(np.mean(flatness))
+
+    onset_env = librosa.onset.onset_strength(y=y, sr=sr)
+    features["onset_pulse"] = float(np.std(onset_env) / (np.mean(onset_env) + 1e-8)) if len(onset_env) > 0 else 0.0
+
     return features
 
 
-def _classify_audio_type(features: Dict[str, float]) -> Tuple[str, float]:
+def _classify_audio_type(features: Dict[str, float], clip_duration: float, full_duration: float) -> Tuple[str, float, Dict[str, float]]:
     """
     Classify audio type based on extracted features.
-    Uses simple rule-based heuristics.
+    Uses conservative, long-track-safe heuristics.
     
     Returns:
-        (audio_type, confidence)
+        (audio_type, confidence, score_map)
     """
-    # Initialize scores
     music_score = 0.0
     speech_score = 0.0
+    beat_strength = float(features.get("beat_strength", 0.0))
+    tempo = float(features.get("tempo", 0.0))
+    zcr_std = float(features.get("zcr_std", 0.0))
+    zcr_mean = float(features.get("zcr_mean", 0.0))
+    rms_var = float(features.get("rms_variation", 0.0))
+    centroid = float(features.get("spectral_centroid_mean", 0.0))
+    flatness = float(features.get("spectral_flatness_mean", 0.0))
+    onset_pulse = float(features.get("onset_pulse", 0.0))
+
+    # Music cues
+    if beat_strength >= 1.6:
+        music_score += 0.32
+    elif beat_strength >= 1.1:
+        music_score += 0.24
+    elif beat_strength >= 0.7:
+        music_score += 0.12
+    else:
+        speech_score += 0.08
+
+    if 70 <= tempo <= 180:
+        music_score += 0.20
+    elif tempo > 0:
+        speech_score += 0.05
+
+    if onset_pulse >= 0.55:
+        music_score += 0.14
+    elif onset_pulse <= 0.25:
+        speech_score += 0.08
+
+    if zcr_std <= 0.025:
+        music_score += 0.10
+    elif zcr_std >= 0.045:
+        speech_score += 0.22
+
+    if zcr_mean >= 0.11:
+        speech_score += 0.10
+
+    if rms_var <= 0.35:
+        music_score += 0.12
+    elif rms_var >= 0.55:
+        speech_score += 0.18
+
+    if centroid >= 3000:
+        music_score += 0.12
+    elif centroid <= 1900:
+        speech_score += 0.12
+
+    if flatness <= 0.015:
+        music_score += 0.06
+    elif flatness >= 0.030:
+        speech_score += 0.08
+
+    music_score = min(1.0, max(0.0, music_score))
+    speech_score = min(1.0, max(0.0, speech_score))
+
+    mixed_score = min(music_score, speech_score) * 0.9
+    if abs(music_score - speech_score) <= 0.12 and max(music_score, speech_score) >= 0.38:
+        mixed_score = min(1.0, mixed_score + 0.12)
+
     jingle_score = 0.0
-    
-    # Rule 1: Strong beat indicates music
-    if features['beat_strength'] > 1.5:
-        music_score += 0.4
-    elif features['beat_strength'] > 1.0:
-        music_score += 0.2
-    
-    # Rule 2: Tempo in typical music range (80-180 BPM)
-    if 80 <= features['tempo'] <= 180:
-        music_score += 0.2
-    
-    # Rule 3: High ZCR variation suggests speech
-    if features['zcr_std'] > 0.05:
-        speech_score += 0.3
-    
-    # Rule 4: Lower spectral centroid suggests speech (voice is lower frequency)
-    if features['spectral_centroid_mean'] < 2000:
-        speech_score += 0.2
-    elif features['spectral_centroid_mean'] > 3000:
-        music_score += 0.2
-    
-    # Rule 5: High RMS variation suggests speech or mixed content
-    if features['rms_variation'] > 0.5:
-        speech_score += 0.2
-    elif features['rms_variation'] < 0.3:
-        music_score += 0.2
-    
-    # Rule 6: Very short duration with high energy could be jingle/ad
-    # (This would need duration info, so we skip for now)
-    
-    # Determine type based on scores
-    max_score = max(music_score, speech_score, jingle_score)
-    
-    if max_score < 0.3:
-        # No clear winner, likely mixed or unknown
-        if music_score > 0.1 and speech_score > 0.1:
-            return "mixed", 0.5
-        return "unknown", 0.3
-    
-    if music_score == max_score:
-        # Check if it could be a jingle (short musical segment)
-        if music_score > 0.5 and speech_score > 0.2:
-            return "jingle_ad", 0.6
-        return "music", min(music_score + 0.3, 0.95)
-    
-    if speech_score == max_score:
-        # Check if mixed (has some musical elements)
-        if music_score > 0.3:
-            return "mixed", 0.7
-        return "speech", min(speech_score + 0.3, 0.95)
-    
-    # Fallback
-    return "mixed", 0.5
+    if (
+        clip_duration <= 35.0
+        and full_duration <= 120.0
+        and music_score >= 0.50
+        and speech_score >= 0.34
+        and abs(music_score - speech_score) <= 0.24
+    ):
+        jingle_score = min(1.0, 0.45 * music_score + 0.55 * speech_score + 0.05)
+
+    scores = {
+        "music": music_score,
+        "speech": speech_score,
+        "mixed": mixed_score,
+        "jingle_ad": jingle_score,
+        "unknown": 0.2,
+    }
+    ranked = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
+    best_type, best_score = ranked[0]
+    second_score = ranked[1][1] if len(ranked) > 1 else 0.0
+
+    if best_score < 0.34:
+        return "unknown", 0.35, scores
+
+    margin = max(0.0, best_score - second_score)
+    confidence = 0.42 + 0.45 * best_score + 0.35 * margin
+    if best_type == "mixed":
+        confidence = min(confidence, 0.85)
+    confidence = max(0.40, min(0.98, confidence))
+
+    return best_type, confidence, scores
 
 
 def _recommend_mode(audio_type: str, confidence: float) -> str:
     """Recommend processing mode based on audio type."""
+    if float(confidence or 0.0) < 0.65:
+        return "Song Hunter | Broadcast Hunter (low confidence)"
     if audio_type == "music":
-        return "Song Hunter | Broadcast Hunter"
+        return "Song Hunter (recommended) | Broadcast Hunter"
     elif audio_type == "speech":
-        return "Broadcast Hunter"
+        return "Broadcast Hunter (recommended)"
     elif audio_type == "mixed":
-        return "Broadcast Hunter | Song Hunter"
+        return "Broadcast Hunter (recommended) | Song Hunter"
     elif audio_type == "jingle_ad":
-        return "Broadcast Hunter"
+        return "Broadcast Hunter (recommended)"
     else:
         return "Song Hunter | Broadcast Hunter"
 
@@ -253,6 +410,8 @@ def resolve_clip_language(
     file_guess = file_language_guess if file_language_guess in {"da", "en"} else "unknown"
     file_conf = float(file_language_confidence or 0.0)
     return {"language_guess": file_guess, "language_confidence": round(file_conf, 3), "language_source": "file"}
+
+
 def extract_language_info(transcribe_result: Dict[str, Any]) -> Dict[str, Any]:
     """
     Extract language detection info from Whisper transcription result.

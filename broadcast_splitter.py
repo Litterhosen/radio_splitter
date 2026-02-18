@@ -8,8 +8,8 @@ from typing import List, Tuple
 
 import numpy as np
 
-from audio_split import detect_non_silent_intervals, get_duration_seconds
-from utils import find_ffmpeg, run_cmd
+from Gradio.audio_split import detect_non_silent_intervals, get_duration_seconds
+from rs_utils import find_ffmpeg, run_cmd
 
 
 def _extract_chunk_wav16k(src: Path, out_wav: Path, start_s: float, dur_s: float) -> None:

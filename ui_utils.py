@@ -6,8 +6,8 @@ from pathlib import Path
 import streamlit as st
 
 from config import THEMES, OVERLAP_THRESHOLD, MIN_DURATION_SECONDS, OUTPUT_ROOT, DECAY_TAIL_DURATION
-from utils import ensure_dir, safe_dirname
-from audio_split import cut_segment_to_wav, cut_segment_to_mp3, cut_segment_with_fades
+from rs_utils import ensure_dir, safe_dirname
+from Gradio.audio_split import cut_segment_to_wav, cut_segment_to_mp3, cut_segment_with_fades
 
 
 def bars_ui_to_int(bars_ui: str) -> int:

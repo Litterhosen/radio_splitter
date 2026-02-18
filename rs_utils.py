@@ -1,4 +1,5 @@
 import re
+import os
 import subprocess
 import hashlib
 import json
@@ -42,18 +43,13 @@ def _ffmpeg_from_imageio() -> Optional[str]:
 def find_ffmpeg() -> str:
     """
     FFMPEG discovery priority:
-    1) st.secrets["FFMPEG_PATH"] (Streamlit)
-    2) env var FFMPEG_PATH (via subprocess inherits env)
-    3) "ffmpeg" in PATH
-    4) imageio-ffmpeg bundled binary
+    1) env var FFMPEG_PATH
+    2) "ffmpeg" in PATH
+    3) imageio-ffmpeg bundled binary
     """
-    try:
-        import streamlit as st
-        sp = st.secrets.get("FFMPEG_PATH", "")
-        if sp:
-            return str(sp)
-    except Exception:
-        pass
+    ffmpeg_env = os.environ.get("FFMPEG_PATH", "").strip()
+    if ffmpeg_env:
+        return ffmpeg_env
 
     # PATH check
     try:

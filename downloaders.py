@@ -170,7 +170,7 @@ def download_audio(url, out_dir) -> Tuple[Path, Dict]:
     Raises:
         DownloadError: If download fails with log file reference and last error
     """
-    from utils import verify_audio_file
+    from rs_utils import verify_audio_file
     
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)

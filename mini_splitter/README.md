@@ -21,18 +21,20 @@ pip install -r requirements.txt
 ## Kørsel
 
 ```bat
-streamlit run app.py
+streamlit run app_mini.py
 ```
 
 ## Struktur
 
 ```text
 mini_splitter/
-  app.py
-  audio_utils.py
+  app.py              # compat wrapper -> app_mini.py
+  app_mini.py
+  ms_audio_utils.py
+  ms_transcribe.py
+  ms_loops.py
+  ms_clipper.py
   transcribe_fw.py
-  loops.py
-  clipper.py
   requirements.txt
   output/
 ```

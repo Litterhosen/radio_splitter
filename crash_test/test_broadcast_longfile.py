@@ -97,7 +97,7 @@ def run_test(broadcast_path: Path, output_dir: Path):
         
         # Check chunking for long files (>=30 min = 1800s)
         # Our test file is 32 min = 1920s, so chunking should be enabled
-        from audio_split import get_duration_seconds
+        from Gradio.audio_split import get_duration_seconds
         duration = get_duration_seconds(broadcast_path)
         
         if duration >= 1800:  # 30 minutes

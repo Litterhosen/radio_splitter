@@ -1,7 +1,7 @@
 import numpy as np
 import librosa
 from dataclasses import dataclass
-from utils import estimate_bars_from_duration
+from rs_utils import estimate_bars_from_duration
 
 
 @dataclass

@@ -1,14 +1,23 @@
 """
 Configuration constants and defaults for the Sample Machine.
 """
+import os
 from pathlib import Path
 from typing import Dict, List, Any
 
 # Version number
 VERSION: str = "1.1.9"
 
-# Output directory
-OUTPUT_ROOT: Path = Path("output")
+# Runtime/output directories (default to local AppData to avoid cloud-sync I/O overhead)
+RUNTIME_ROOT: Path = Path(
+    os.getenv(
+        "RADIO_SPLITTER_RUNTIME_ROOT",
+        str(Path.home() / "AppData" / "Local" / "radio_splitter2"),
+    )
+).resolve()
+OUTPUT_ROOT: Path = Path(
+    os.getenv("RADIO_SPLITTER_OUTPUT_ROOT", str(RUNTIME_ROOT / "output"))
+).resolve()
 
 # Anti-overlap and filter thresholds
 OVERLAP_THRESHOLD: float = 0.30  # 30% overlap threshold for duplicate detection
@@ -53,6 +62,7 @@ DEFAULTS: Dict[str, Any] = {
     "broadcast_split_method": "VAD-first (recommended)",
     "export_without_transcript": True,
     "quick_scan_window_sec": 75.0,
+    "quick_scan_probe_segments": 8,
     "fixed_len": 8.0,
     "hook_len_range_min": 4.0,
     "hook_len_range_max": 15.0,

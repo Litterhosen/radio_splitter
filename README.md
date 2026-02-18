@@ -58,6 +58,11 @@ Se **MERGE_TIL_MAIN.md** for guide til at gøre denne version til main.
 
 ## 💻 Kør Lokalt
 
+### App Entry Points (adskilt)
+- Main app: `app_main.py` (compat wrapper: `app.py`)
+- Mini app: `mini_splitter/app_mini.py` (compat wrapper: `mini_splitter/app.py`)
+- Gradio app: `Gradio/app_gradio.py`
+
 ### Krav
 - Python 3.11+
 - FFmpeg (system installation eller via packages.txt)
@@ -69,11 +74,11 @@ python -m venv .venv
 .\.venv\Scripts\activate
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
-python -m streamlit run app.py
+python -m streamlit run app_main.py
 
 # macOS/Linux
 python3 -m venv .venv
 source .venv/bin/activate
 pip install --upgrade pip
 pip install -r requirements.txt
-streamlit run app.py
+streamlit run app_main.py
