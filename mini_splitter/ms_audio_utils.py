@@ -32,6 +32,5 @@ def to_wav(src: Path, dst: Path, sr: int, mono: bool):
     ]
     subprocess.run(cmd, check=True, capture_output=True)
 
-@st.cache_data(show_spinner=False)
 def read_bytes(path: Path) -> bytes:
     return Path(path).read_bytes()

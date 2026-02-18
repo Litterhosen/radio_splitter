@@ -17,7 +17,7 @@ if str(HERE) not in sys.path:
 if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))
 
-from ms_audio_utils import ensure_ffmpeg, save_uploaded_file, probe_audio, to_wav, read_bytes
+from ms_audio_utils import ensure_ffmpeg, save_uploaded_file, probe_audio, to_wav
 from ms_transcribe import transcribe_audio
 from ms_clipper import export_clips_from_segments
 from ms_loops import export_bar_loops
@@ -171,6 +171,29 @@ def _format_clock(seconds: float) -> str:
     m = (total % 3600) // 60
     s = total % 60
     return f"{h:02d}:{m:02d}:{s:02d}"
+
+
+def _download_button_from_path(
+    label: str,
+    path: Path,
+    mime: str,
+    *,
+    key: Optional[str] = None,
+    use_container_width: bool = True,
+) -> None:
+    p = Path(path)
+    if not p.exists():
+        st.warning(f"Fil mangler: {p.name}")
+        return
+    with p.open("rb") as fh:
+        st.download_button(
+            label,
+            data=fh,
+            file_name=p.name,
+            mime=mime,
+            key=key,
+            use_container_width=use_container_width,
+        )
 
 
 def _profile_config(profile: str) -> Tuple[float, float]:
@@ -527,11 +550,11 @@ if job:
     st.subheader("Download ALL")
     if job.zip_path and Path(job.zip_path).exists():
         st.markdown('<div class="mainzip">', unsafe_allow_html=True)
-        st.download_button(
+        _download_button_from_path(
             "⬇️ Download ALL outputs as ZIP",
-            data=read_bytes(job.zip_path),
-            file_name=job.zip_path.name,
+            Path(job.zip_path),
             mime="application/zip",
+            key=f"dl_zip_{job.job_id}",
             use_container_width=True,
         )
         st.markdown("</div>", unsafe_allow_html=True)
@@ -550,39 +573,39 @@ if job:
 
             c1, c2, c3 = st.columns(3)
             with c1:
-                st.download_button(
+                _download_button_from_path(
                     "Download transcript.txt",
-                    data=read_bytes(job.transcript_txt),
-                    file_name=job.transcript_txt.name,
+                    Path(job.transcript_txt),
                     mime="text/plain",
+                    key=f"dl_txt_{job.job_id}",
                     use_container_width=True,
                 )
             with c2:
                 if job.transcript_srt and job.transcript_srt.exists():
-                    st.download_button(
+                    _download_button_from_path(
                         "Download transcript.srt",
-                        data=read_bytes(job.transcript_srt),
-                        file_name=job.transcript_srt.name,
+                        Path(job.transcript_srt),
                         mime="text/plain",
+                        key=f"dl_srt_{job.job_id}",
                         use_container_width=True,
                     )
             with c3:
                 if job.transcript_json and job.transcript_json.exists():
-                    st.download_button(
+                    _download_button_from_path(
                         "Download transcript.json",
-                        data=read_bytes(job.transcript_json),
-                        file_name=job.transcript_json.name,
+                        Path(job.transcript_json),
                         mime="application/json",
+                        key=f"dl_json_{job.job_id}",
                         use_container_width=True,
                     )
 
             if job.transcript_words_json and job.transcript_words_json.exists():
                 st.info("WhisperX word-level timings er tilgængelige.")
-                st.download_button(
+                _download_button_from_path(
                     "Download transcript_words.json (WhisperX)",
-                    data=read_bytes(job.transcript_words_json),
-                    file_name=job.transcript_words_json.name,
+                    Path(job.transcript_words_json),
                     mime="application/json",
+                    key=f"dl_words_{job.job_id}",
                     use_container_width=True,
                 )
         else:
@@ -592,11 +615,11 @@ if job:
     with tab_clips:
         st.subheader("Clip preview + individual download")
         if job.focus_report_json and job.focus_report_json.exists():
-            st.download_button(
+            _download_button_from_path(
                 "Download clip_focus_report.json",
-                data=read_bytes(job.focus_report_json),
-                file_name=job.focus_report_json.name,
+                Path(job.focus_report_json),
                 mime="application/json",
+                key=f"dl_focus_{job.job_id}",
                 use_container_width=True,
             )
         if job.clips_dir and job.clips_dir.exists():
@@ -607,12 +630,12 @@ if job:
                 options = {_safe_rel(p, job.clips_dir): p for p in files}
                 choice = st.selectbox("Vælg et klip", list(options.keys()))
                 p = options[choice]
-                st.audio(read_bytes(p))
-                st.download_button(
+                st.audio(str(p))
+                _download_button_from_path(
                     "Download selected clip",
-                    data=read_bytes(p),
-                    file_name=p.name,
+                    p,
                     mime="audio/wav" if p.suffix.lower() == ".wav" else "audio/mpeg",
+                    key=f"dl_clip_{job.job_id}_{p.name}",
                     use_container_width=True,
                 )
                 st.caption(f"{len(files)} clips i alt.")
@@ -635,12 +658,12 @@ if job:
                 options = {_safe_rel(p, job.loops_dir): p for p in files}
                 choice = st.selectbox("Vælg et loop", list(options.keys()))
                 p = options[choice]
-                st.audio(read_bytes(p))
-                st.download_button(
+                st.audio(str(p))
+                _download_button_from_path(
                     "Download selected loop",
-                    data=read_bytes(p),
-                    file_name=p.name,
+                    p,
                     mime="audio/wav" if p.suffix.lower() == ".wav" else "audio/mpeg",
+                    key=f"dl_loop_{job.job_id}_{p.name}",
                     use_container_width=True,
                 )
                 st.caption(f"{len(files)} loops i alt.")
