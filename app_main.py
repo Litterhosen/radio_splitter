@@ -26,7 +26,6 @@ from config import VERSION
 
 st.set_page_config(page_title=f"The Sample Machine v{VERSION}", layout="wide")
 
-import io
 import json
 import zipfile
 import traceback
@@ -246,6 +245,64 @@ def _update_progress_bar(bar, started_at: float, done: float, total: float, labe
     eta = (elapsed / frac - elapsed) if frac > 1e-6 else 0.0
     text = f"{int(frac * 100):3d}% | {label} | elapsed {_format_clock(elapsed)} | ETA {_format_clock(eta)}"
     bar.progress(frac, text=text)
+
+
+def _resolve_download_dir() -> Path:
+    run_id = str(st.session_state.get("active_run_id", "") or "").strip()
+    if run_id:
+        return ensure_dir(OUTPUT_ROOT / run_id / "_downloads")
+
+    manifest_path = st.session_state.get("manifest_path", "")
+    if manifest_path:
+        try:
+            manifest_parent = Path(str(manifest_path)).resolve().parent
+            if manifest_parent.exists():
+                return ensure_dir(manifest_parent / "_downloads")
+        except Exception:
+            pass
+
+    return ensure_dir(OUTPUT_ROOT / "_downloads")
+
+
+def _download_button_from_path(
+    label: str,
+    path: Path,
+    mime: str,
+    *,
+    key: Optional[str] = None,
+    use_container_width: bool = True,
+    file_name: Optional[str] = None,
+) -> None:
+    p = Path(path)
+    if not p.exists():
+        st.warning(f"Download file not found: {p.name}")
+        return
+    with p.open("rb") as fh:
+        st.download_button(
+            label,
+            data=fh,
+            file_name=file_name or p.name,
+            mime=mime,
+            key=key,
+            use_container_width=use_container_width,
+        )
+
+
+def _write_zip_to_path(
+    zip_path: Path,
+    file_entries: List[Tuple[Path, str]],
+    *,
+    memory_entries: Optional[List[Tuple[str, bytes]]] = None,
+) -> Path:
+    zip_path.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as z:
+        for file_path, arcname in file_entries:
+            p = Path(file_path)
+            if p.exists():
+                z.write(p, arcname=arcname)
+        for arcname, payload in (memory_entries or []):
+            z.writestr(arcname, payload)
+    return zip_path
 
 
 @st.cache_data(show_spinner=False)
@@ -1299,11 +1356,11 @@ if run_btn or st.session_state.pop("quick_scan_proceed", False):
         )
         crash_log_path.write_text(crash_payload, encoding="utf-8")
         st.error("❌ Run failed, see crash.log")
-        st.download_button(
+        _download_button_from_path(
             "⬇️ Download crash.log",
-            data=crash_payload.encode("utf-8"),
-            file_name=f"{run_id}_crash.log",
+            crash_log_path,
             mime="text/plain",
+            key=f"dl_crash_{run_id}",
             use_container_width=True,
         )
         if st.session_state.get("debug_mode", False):
@@ -1532,24 +1589,29 @@ if "results" in st.session_state and st.session_state.results:
         st.divider()
         st.subheader("🧾 Full Transcripts")
 
-        run_transcript_bundle = io.BytesIO()
-        with zipfile.ZipFile(run_transcript_bundle, "w", zipfile.ZIP_DEFLATED) as z_run:
-            for artifact in st.session_state.get("source_artifacts", []):
-                src_stem = Path(artifact["source"]).stem
-                for key in ["transcript_full_txt_path", "transcript_full_json_path"]:
-                    fp = Path(artifact.get(key, ""))
-                    if fp.exists():
-                        z_run.write(fp, arcname=f"{src_stem}/{fp.name}")
-        run_transcript_bundle.seek(0)
-        st.download_button(
-            "⬇️ Download full transcript bundle (run)",
-            data=run_transcript_bundle,
-            file_name="transcripts_full_run.zip",
-            mime="application/zip",
-            use_container_width=True,
-        )
+        source_artifacts = st.session_state.get("source_artifacts", [])
+        download_dir = _resolve_download_dir()
 
-        for artifact in st.session_state.get("source_artifacts", []):
+        run_zip_entries: List[Tuple[Path, str]] = []
+        for artifact in source_artifacts:
+            src_stem = Path(artifact["source"]).stem
+            for key in ["transcript_full_txt_path", "transcript_full_json_path"]:
+                fp = Path(artifact.get(key, ""))
+                if fp.exists():
+                    run_zip_entries.append((fp, f"{src_stem}/{fp.name}"))
+
+        if run_zip_entries:
+            run_transcript_zip_path = download_dir / "transcripts_full_run.zip"
+            _write_zip_to_path(run_transcript_zip_path, run_zip_entries)
+            _download_button_from_path(
+                "⬇️ Download full transcript bundle (run)",
+                run_transcript_zip_path,
+                mime="application/zip",
+                key="dl_transcripts_full_run",
+                use_container_width=True,
+            )
+
+        for artifact_idx, artifact in enumerate(source_artifacts, start=1):
             src = artifact["source"]
             src_stem = Path(src).stem
             with st.expander(f"📄 {src}", expanded=False):
@@ -1558,43 +1620,51 @@ if "results" in st.session_state and st.session_state.results:
                 json_path = Path(artifact["transcript_full_json_path"])
                 if txt_path.exists():
                     with c1:
-                        st.download_button(
+                        _download_button_from_path(
                             f"⬇️ Download full transcript (.txt) — {src_stem}",
-                            data=txt_path.read_bytes(),
-                            file_name=f"{src_stem}_transcript_full.txt",
+                            txt_path,
                             mime="text/plain",
-                            key=f"dl_txt_{src_stem}",
+                            key=f"dl_txt_{artifact_idx}",
+                            file_name=f"{src_stem}_transcript_full.txt",
                         )
                 if json_path.exists():
                     with c2:
-                        st.download_button(
+                        _download_button_from_path(
                             f"⬇️ Download full transcript (.json) — {src_stem}",
-                            data=json_path.read_bytes(),
-                            file_name=f"{src_stem}_transcript_full.json",
+                            json_path,
                             mime="application/json",
-                            key=f"dl_json_{src_stem}",
+                            key=f"dl_json_{artifact_idx}",
+                            file_name=f"{src_stem}_transcript_full.json",
                         )
 
                 source_selected = selected[selected["source"] == src] if "source" in selected.columns else pd.DataFrame([])
-                src_zip = io.BytesIO()
-                with zipfile.ZipFile(src_zip, "w", zipfile.ZIP_DEFLATED) as z_src:
-                    if txt_path.exists():
-                        z_src.write(txt_path, arcname=f"{src_stem}/{txt_path.name}")
-                    if json_path.exists():
-                        z_src.write(json_path, arcname=f"{src_stem}/{json_path.name}")
-                    for _, row in source_selected.iterrows():
-                        for k in ["clip_path", "txt", "json", "transcript_full_txt_path", "transcript_full_json_path"]:
-                            fp = Path(row.get(k, ""))
-                            if fp.exists():
-                                z_src.write(fp, arcname=f"{src_stem}/{fp.name}")
-                src_zip.seek(0)
-                st.download_button(
-                    f"📦 Download per-source ZIP — {src_stem}",
-                    data=src_zip,
-                    file_name=f"{src_stem}_bundle.zip",
-                    mime="application/zip",
-                    key=f"dl_zip_{src_stem}",
-                )
+                src_zip_entries: List[Tuple[Path, str]] = []
+                if txt_path.exists():
+                    src_zip_entries.append((txt_path, f"{src_stem}/{txt_path.name}"))
+                if json_path.exists():
+                    src_zip_entries.append((json_path, f"{src_stem}/{json_path.name}"))
+                for _, row in source_selected.iterrows():
+                    for k in ["clip_path", "txt", "json", "transcript_full_txt_path", "transcript_full_json_path"]:
+                        raw = row.get(k, "")
+                        if raw is None or (isinstance(raw, float) and pd.isna(raw)) or str(raw).strip() == "":
+                            continue
+                        fp = Path(str(raw))
+                        if fp.exists():
+                            src_zip_entries.append((fp, f"{src_stem}/{fp.name}"))
+
+                if src_zip_entries:
+                    src_slug = safe_slug(src_stem, max_len=80) or f"source_{artifact_idx:03d}"
+                    src_zip_path = download_dir / f"{src_slug}_bundle.zip"
+                    _write_zip_to_path(src_zip_path, src_zip_entries)
+                    _download_button_from_path(
+                        f"📦 Download per-source ZIP — {src_stem}",
+                        src_zip_path,
+                        mime="application/zip",
+                        key=f"dl_zip_{artifact_idx}",
+                        file_name=f"{src_stem}_bundle.zip",
+                    )
+                else:
+                    st.caption("No files available for source ZIP.")
 
                 q = st.text_input("Search transcript", key=f"search_{src_stem}")
                 segs = artifact.get("segments", [])
@@ -1615,30 +1685,33 @@ if "results" in st.session_state and st.session_state.results:
 
     # Export ZIP
     if st.button("📦 Export ZIP (Selected)", type="primary", use_container_width=True):
-        zip_buf = io.BytesIO()
-        with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as z:
-            # Add manifest
-            z.writestr(
-                "manifest_selected.csv",
-                selected.to_csv(index=False).encode("utf-8")
-            )
-            
-            # Add files
-            for _, r in selected.iterrows():
-                src_stem = Path(r["source"]).stem
-                for k in ["clip_path", "txt", "json", "transcript_full_txt_path", "transcript_full_json_path"]:
-                    if k in r and r[k]:
-                        fp = Path(r[k])
-                        if fp.exists():
-                            z.write(fp, arcname=f"{src_stem}/{fp.name}")
-        
-        zip_buf.seek(0)
-        st.download_button(
+        download_dir = _resolve_download_dir()
+        selected_zip_path = download_dir / "sample_machine_clips_selected.zip"
+        selected_entries: List[Tuple[Path, str]] = []
+        for _, r in selected.iterrows():
+            src_stem = Path(r["source"]).stem
+            for k in ["clip_path", "txt", "json", "transcript_full_txt_path", "transcript_full_json_path"]:
+                raw = r.get(k, "")
+                if raw is None or (isinstance(raw, float) and pd.isna(raw)) or str(raw).strip() == "":
+                    continue
+                fp = Path(str(raw))
+                if fp.exists():
+                    selected_entries.append((fp, f"{src_stem}/{fp.name}"))
+
+        _write_zip_to_path(
+            selected_zip_path,
+            selected_entries,
+            memory_entries=[
+                ("manifest_selected.csv", selected.to_csv(index=False).encode("utf-8")),
+            ],
+        )
+        _download_button_from_path(
             label="⬇️ Download ZIP",
-            data=zip_buf,
+            path=selected_zip_path,
             file_name="sample_machine_clips.zip",
             mime="application/zip",
             use_container_width=True,
+            key=f"dl_selected_zip_{st.session_state.get('active_run_id', 'run')}",
         )
 else:
     st.info("👆 Upload or download a file, load the Whisper model, and click Process to begin.")
