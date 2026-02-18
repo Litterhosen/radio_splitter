@@ -82,3 +82,24 @@ source .venv/bin/activate
 pip install --upgrade pip
 pip install -r requirements.txt
 streamlit run app_main.py
+```
+
+### Hurtig Start (copy/paste)
+```powershell
+# Fra projektmappen:
+cd C:\Users\brian\Programmering\radio_splitter2
+
+# Main Streamlit
+powershell -ExecutionPolicy Bypass -File tools\run_main_streamlit.ps1 -Port 8501
+
+# Mini Streamlit
+powershell -ExecutionPolicy Bypass -File tools\run_mini_streamlit.ps1 -Port 8502
+
+# Gradio
+powershell -ExecutionPolicy Bypass -File tools\run_gradio.ps1 -Port 7860
+```
+
+```powershell
+# Hvis Gradio mangler pakker i local venv:
+powershell -ExecutionPolicy Bypass -File tools\setup_local_gradio_venv.ps1 -ProjectRoot . -Recreate
+```
