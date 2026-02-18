@@ -23,12 +23,18 @@ jobs:
       - name: Read current version
         id: current_version
         run: |
-          # Extract version from app.py (expected on line 5)
-          CURRENT_VERSION=$(grep -E '^\s*VERSION = "[0-9]+\.[0-9]+\.[0-9]+"' app.py | sed -E 's/.*VERSION = "([0-9]+\.[0-9]+\.[0-9]+)".*/\1/')
-          if [ -z "$CURRENT_VERSION" ]; then
-            echo "Error: Could not extract version from app.py"
-            exit 1
-          fi
+          # Extract version from config.py (source of truth)
+          CURRENT_VERSION=$(python - <<'PY'
+          import re
+          from pathlib import Path
+
+          text = Path("config.py").read_text(encoding="utf-8")
+          m = re.search(r'^\s*VERSION(?:\s*:\s*str)?\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+)"', text, re.M)
+          if not m:
+              raise SystemExit("Error: Could not extract version from config.py")
+          print(m.group(1))
+          PY
+          )
           echo "Current version: $CURRENT_VERSION"
           echo "version=$CURRENT_VERSION" >> $GITHUB_OUTPUT
       
@@ -46,25 +52,25 @@ jobs:
           echo "New version: $NEW_VERSION"
           echo "version=$NEW_VERSION" >> $GITHUB_OUTPUT
       
-      - name: Update version in app.py
+      - name: Update version in config.py
         run: |
           NEW_VERSION="${{ steps.new_version.outputs.version }}"
-          # Update VERSION line in app.py (using consistent extended regex)
-          sed -i -E 's/^(\s*)VERSION = "[0-9]+\.[0-9]+\.[0-9]+"/\1VERSION = "'$NEW_VERSION'"/' app.py
+          # Update VERSION line in config.py
+          sed -i -E 's/^(\s*)VERSION(\s*:\s*str)?\s*=\s*"[0-9]+\.[0-9]+\.[0-9]+"/\1VERSION\2 = "'$NEW_VERSION'"/' config.py
           # Verify the change
-          echo "Updated version in app.py:"
-          grep -E '^\s*VERSION = ' app.py
+          echo "Updated version in config.py:"
+          grep -E '^\s*VERSION(\s*:\s*str)?\s*=' config.py
       
       - name: Commit and push changes
         run: |
           NEW_VERSION="${{ steps.new_version.outputs.version }}"
           # Check if there are changes to commit
-          if git diff --quiet app.py; then
+          if git diff --quiet config.py; then
             echo "No version changes needed"
             exit 0
           fi
           git config --global user.name 'github-actions[bot]'
           git config --global user.email 'github-actions[bot]@users.noreply.github.com'
-          git add app.py
+          git add config.py
           git commit -m "chore: auto-bump version to $NEW_VERSION [skip ci]"
           git push
