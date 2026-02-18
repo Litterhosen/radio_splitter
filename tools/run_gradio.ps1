@@ -42,9 +42,6 @@ if (-not $py) {
 Push-Location $ProjectRoot
 try {
     Write-Host "Using python: $py"
-    if ($py -match "iCloudDrive") {
-        Write-Warning "Detected python from iCloud path. Prefer tools/setup_local_gradio_venv.ps1 and tools/run_gradio_local.ps1."
-    }
     & $py $app
 }
 finally {
