@@ -106,6 +106,65 @@ def _safe_rel(p: Path, root: Path) -> str:
         return p.name
 
 
+def _find_recent_runs(root: Path, limit: int = 20) -> List[Path]:
+    if not root.exists():
+        return []
+    dirs = [p for p in root.iterdir() if p.is_dir()]
+    dirs.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    return dirs[:limit]
+
+
+def _build_job_from_output_dir(out_dir: Path) -> Optional["JobOutputs"]:
+    if not out_dir.exists():
+        return None
+
+    src_candidates = [p for p in out_dir.iterdir() if p.is_file() and p.suffix.lower() in {".mp3", ".wav", ".m4a", ".flac", ".aac", ".ogg"}]
+    src_path = src_candidates[0] if src_candidates else (out_dir / "source_unknown.wav")
+    wav_speech = out_dir / "input_speech.wav"
+    wav_music = out_dir / "input_music.wav"
+    zip_path = out_dir / f"{out_dir.name}_mini_splitter.zip"
+    if not zip_path.exists():
+        try:
+            _zip_folder_to_file(out_dir, zip_path)
+        except Exception:
+            pass
+
+    job = JobOutputs(
+        job_id=out_dir.name,
+        out_dir=out_dir,
+        src_path=src_path,
+        wav_speech=wav_speech,
+        wav_music=wav_music,
+    )
+    if zip_path.exists():
+        job.zip_path = zip_path
+
+    t_txt = out_dir / "transcript.txt"
+    t_srt = out_dir / "transcript.srt"
+    t_json = out_dir / "transcript.json"
+    t_words = out_dir / "transcript_words.json"
+    if t_txt.exists():
+        job.transcript_txt = t_txt
+    if t_srt.exists():
+        job.transcript_srt = t_srt
+    if t_json.exists():
+        job.transcript_json = t_json
+    if t_words.exists():
+        job.transcript_words_json = t_words
+
+    clips_dir = out_dir / "clips"
+    loops_dir = out_dir / "loops"
+    focus_report = out_dir / "clip_focus_report.json"
+    if clips_dir.exists():
+        job.clips_dir = clips_dir
+    if loops_dir.exists():
+        job.loops_dir = loops_dir
+    if focus_report.exists():
+        job.focus_report_json = focus_report
+
+    return job
+
+
 def _format_clock(seconds: float) -> str:
     total = max(0, int(round(seconds)))
     h = total // 3600
@@ -227,6 +286,24 @@ with st.sidebar:
 st.write(
     "Upload en lydfil eller indsæt en URL. Focused mode giver et strammere udvalg af samples med score og anti-overlap."
 )
+
+with st.expander("Recovery / Load previous run", expanded=False):
+    recent = _find_recent_runs(OUTPUT_ROOT, limit=20)
+    labels = [f"{p.name}  ({datetime.fromtimestamp(p.stat().st_mtime).strftime('%Y-%m-%d %H:%M:%S')})" for p in recent]
+    if labels:
+        choice = st.selectbox("Vælg tidligere output-mappe", labels, index=0)
+        idx = labels.index(choice)
+        chosen_dir = recent[idx]
+        if st.button("Load selected run"):
+            loaded = _build_job_from_output_dir(chosen_dir)
+            if loaded:
+                st.session_state.job = loaded
+                st.success(f"Loaded run: {chosen_dir.name}")
+                st.rerun()
+            else:
+                st.error("Kunne ikke indlæse valgt run.")
+    else:
+        st.caption("Ingen tidligere runs fundet endnu.")
 
 uploaded = st.file_uploader("Audio file", type=["mp3", "wav", "m4a", "flac", "aac", "ogg"], disabled=(input_mode != "Upload fil"))
 url_input = st.text_input("YouTube / online URL", "", disabled=(input_mode != "YouTube/URL"))
@@ -432,8 +509,12 @@ def run_pipeline() -> JobOutputs:
 
 # --- Run ---
 if run:
-    job = run_pipeline()
-    st.session_state.job = job
+    try:
+        job = run_pipeline()
+        st.session_state.job = job
+    except Exception as e:
+        st.error(f"Run failed: {type(e).__name__}: {e}")
+        st.exception(e)
 
 job: Optional[JobOutputs] = st.session_state.job
 
@@ -444,15 +525,18 @@ if job:
 
     # MAIN ZIP download (big)
     st.subheader("Download ALL")
-    st.markdown('<div class="mainzip">', unsafe_allow_html=True)
-    st.download_button(
-        "⬇️ Download ALL outputs as ZIP",
-        data=read_bytes(job.zip_path),
-        file_name=job.zip_path.name,
-        mime="application/zip",
-        use_container_width=True,
-    )
-    st.markdown("</div>", unsafe_allow_html=True)
+    if job.zip_path and Path(job.zip_path).exists():
+        st.markdown('<div class="mainzip">', unsafe_allow_html=True)
+        st.download_button(
+            "⬇️ Download ALL outputs as ZIP",
+            data=read_bytes(job.zip_path),
+            file_name=job.zip_path.name,
+            mime="application/zip",
+            use_container_width=True,
+        )
+        st.markdown("</div>", unsafe_allow_html=True)
+    else:
+        st.warning("ZIP ikke fundet for dette run. Brug Recovery for at indlæse et fuldt run.")
     st.caption(f"Output folder: {job.out_dir.resolve()}")
 
     tab_trans, tab_clips, tab_loops = st.tabs(["Transcript", "Clips", "Loops"])
@@ -562,3 +646,5 @@ if job:
                 st.caption(f"{len(files)} loops i alt.")
         else:
             st.info("Kør Loops (Music) eller All for at få loops.")
+else:
+    st.info("Kør et run først eller brug 'Recovery / Load previous run' for at få preview og eksport-knapper.")

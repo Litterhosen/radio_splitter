@@ -5,6 +5,16 @@ from pathlib import Path
 import numpy as np
 import librosa
 
+
+def _safe_tempo_scalar(tempo) -> float:
+    if hasattr(tempo, "__len__"):
+        return float(tempo[0]) if len(tempo) > 0 else 120.0
+    try:
+        return float(tempo)
+    except Exception:
+        return 120.0
+
+
 def export_bar_loops(
     wav_music: Path,
     out_dir: Path,
@@ -21,11 +31,11 @@ def export_bar_loops(
     y_mono = librosa.to_mono(y) if getattr(y, "ndim", 1) > 1 else y
 
     tempo, beat_frames = librosa.beat.beat_track(y=y_mono, sr=sr)
+    tempo_val = _safe_tempo_scalar(tempo)
     beat_times = librosa.frames_to_time(beat_frames, sr=sr)
 
     if len(beat_times) < 8:
-        tempo = float(tempo) if tempo else 120.0
-        beat_period = 60.0 / float(tempo)
+        beat_period = 60.0 / float(max(tempo_val, 1e-6))
         duration = librosa.get_duration(y=y_mono, sr=sr)
         beat_times = np.arange(0.0, duration, beat_period)
 
@@ -104,7 +114,7 @@ def export_bar_loops(
         for idx, item in enumerate(selected, start=1)
     )
     (out_dir / "loops_report.txt").write_text(
-        f"Detected tempo: {float(tempo):.2f} BPM\n"
+        f"Detected tempo: {float(tempo_val):.2f} BPM\n"
         f"Beats found: {len(beat_times)}\n"
         f"Bars per loop: {bars}\n"
         f"Candidates: {len(candidates)}\n"
