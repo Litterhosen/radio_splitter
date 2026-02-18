@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Dict, List, Any
 
 # Version number
-VERSION: str = "1.1.13"
+VERSION: str = "1.1.14"
 
 # Runtime/output directories (default to local AppData to avoid cloud-sync I/O overhead)
 RUNTIME_ROOT: Path = Path(
