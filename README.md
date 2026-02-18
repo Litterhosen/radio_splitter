@@ -51,6 +51,7 @@ Se **MERGE_TIL_MAIN.md** for guide til at gøre denne version til main.
 
 - 🇩🇰 **HURTIG_LØSNING.md** - Quick Danish guide
 - 🔧 **STREAMLIT_ACCESS_TROUBLESHOOTING.md** - Troubleshooting
+- 🤖 **STREAMLIT_MODEL_SETUP_1_BY_1.md** - Model setup én ad gangen
 - ✅ **DEPLOYMENT_CHECKLIST.md** - Deployment checklist
 - 📊 **BRANCH_COMPARISON.md** - Branch comparison
 - 🔀 **MERGE_TIL_MAIN.md** - How to merge to main
