@@ -64,6 +64,7 @@ from audio_detection import (
 # Import configuration and UI utilities
 from config import (
     OUTPUT_ROOT,
+    MIN_DURATION_SECONDS,
     MIN_CLIP_DURATION_SECONDS,
     MAX_SLUG_LENGTH,
     MAX_STEM_LENGTH,
@@ -189,9 +190,10 @@ def detect_file_language(model, in_path: Path, session_dir: Path, forced_languag
 
 SONG_HUNTER_LONG_FILE_LIMIT_MINUTES = 20.0
 SONG_HUNTER_LONG_FILE_LIMIT_SECONDS = SONG_HUNTER_LONG_FILE_LIMIT_MINUTES * 60.0
+BROADCAST_MIN_SEGMENT_SEC = max(float(MIN_DURATION_SECONDS), float(MIN_CLIP_DURATION_SECONDS), 4.0)
 
 
-def _broadcast_diagnostics_template() -> Dict[str, int]:
+def _broadcast_diagnostics_template() -> Dict[str, Any]:
     return {
         "segments_total": 0,
         "segments_too_short": 0,
@@ -245,6 +247,32 @@ def _update_progress_bar(bar, started_at: float, done: float, total: float, labe
     eta = (elapsed / frac - elapsed) if frac > 1e-6 else 0.0
     text = f"{int(frac * 100):3d}% | {label} | elapsed {_format_clock(elapsed)} | ETA {_format_clock(eta)}"
     bar.progress(frac, text=text)
+
+
+def _broadcast_runtime_settings() -> Tuple[float, float, float]:
+    profile = str(st.session_state.get("broadcast_profile", "Balanced"))
+    max_segment_sec = float(st.session_state.get("max_segment_s", 45.0))
+    merge_gap_sec = float(st.session_state.get("merge_gap_s", 0.35))
+    chunk_sec = float(st.session_state.get("broadcast_chunk_s", 600.0))
+    if profile.startswith("Overview"):
+        # Overview profile favors fewer/larger segments for long archival recordings.
+        max_segment_sec = max(max_segment_sec, 300.0)
+        merge_gap_sec = max(merge_gap_sec, 1.10)
+        chunk_sec = max(chunk_sec, 900.0)
+    return max_segment_sec, merge_gap_sec, chunk_sec
+
+
+def _silence_runtime_settings() -> Dict[str, Any]:
+    mode_ui = str(st.session_state.get("silence_threshold_mode", "Auto (noise floor + margin)"))
+    mode = "auto" if mode_ui.startswith("Auto") else "manual"
+    return {
+        "threshold_mode": mode,
+        "noise_db": float(st.session_state.get("noise_db", -28.0)),
+        "margin_db": float(st.session_state.get("silence_margin_db", 10.0)),
+        "quick_test_mode": bool(st.session_state.get("silence_quick_test_enabled", True)),
+        "quick_test_seconds": float(st.session_state.get("silence_quick_test_seconds", 120.0)),
+        "quick_test_retries": int(st.session_state.get("silence_quick_test_retries", 3)),
+    }
 
 
 def _resolve_download_dir() -> Path:
@@ -344,24 +372,47 @@ st.sidebar.slider("Slug words", 2, 12, key="slug_words")
 if st.session_state["mode"] == "📻 Broadcast Hunter (Mix)":
     st.sidebar.subheader("📻 Broadcast Split")
     st.sidebar.selectbox(
+        "Broadcast profile",
+        ["Balanced", "Overview (long segments)"],
+        key="broadcast_profile",
+    )
+    st.sidebar.selectbox(
         "Split method",
         ["VAD-first (recommended)", "Energy-first"],
         key="broadcast_split_method",
     )
-    st.sidebar.caption("Minimum segment is fixed at 1.5s")
-    st.sidebar.slider("Max segment (sec)", 10.0, 120.0, step=1.0, key="max_segment_s")
-    st.sidebar.slider("Merge gap (sec)", 0.1, 1.0, step=0.05, key="merge_gap_s")
-    st.sidebar.slider("Chunk size (sec)", 300.0, 900.0, step=60.0, key="broadcast_chunk_s")
+    st.sidebar.caption(f"Minimum segment is fixed at {BROADCAST_MIN_SEGMENT_SEC:.1f}s")
+    st.sidebar.slider("Max segment (sec)", 10.0, 1800.0, step=5.0, key="max_segment_s")
+    st.sidebar.slider("Merge gap (sec)", 0.1, 3.0, step=0.05, key="merge_gap_s")
+    st.sidebar.slider("Chunk size (sec)", 300.0, 3600.0, step=60.0, key="broadcast_chunk_s")
+    if st.session_state.get("broadcast_profile", "Balanced").startswith("Overview"):
+        eff_max, eff_gap, eff_chunk = _broadcast_runtime_settings()
+        st.sidebar.caption(
+            f"Overview active: runtime max segment {eff_max:.0f}s, merge gap {eff_gap:.2f}s, chunk {eff_chunk:.0f}s."
+        )
     st.sidebar.slider("Quick Scan probes/window", 2, 20, step=1, key="quick_scan_probe_segments")
     st.sidebar.checkbox("Export without transcript", key="export_without_transcript")
     with st.sidebar.expander("Silence fallback tuning", expanded=False):
-        st.slider("Silence threshold (dB)", -60.0, -10.0, step=1.0, key="noise_db")
+        st.selectbox(
+            "Threshold mode",
+            ["Auto (noise floor + margin)", "Manual (fixed dB)"],
+            key="silence_threshold_mode",
+        )
+        if str(st.session_state.get("silence_threshold_mode", "")).startswith("Auto"):
+            st.slider("Auto margin (dB)", 4.0, 16.0, step=0.5, key="silence_margin_db")
+            st.caption("Threshold = noise_floor + margin, then clamped to [-55, -18] dB.")
+        else:
+            st.slider("Silence threshold (dB)", -60.0, -10.0, step=1.0, key="noise_db")
         st.slider("Min silence (sec)", 0.2, 2.0, step=0.1, key="min_silence_s")
         st.slider("Padding (sec)", 0.0, 1.0, step=0.05, key="pad_s")
+        st.checkbox("Quick test mode (first part only)", key="silence_quick_test_enabled")
+        if st.session_state.get("silence_quick_test_enabled", True):
+            st.slider("Quick test window (sec)", 30.0, 300.0, step=10.0, key="silence_quick_test_seconds")
+            st.slider("Quick test retries", 1, 3, step=1, key="silence_quick_test_retries")
 else:
     st.sidebar.subheader("🎵 Hook Detection")
-    st.sidebar.slider("Min hook length (sec)", 2.0, 30.0, step=0.5, key="hook_len_range_min")
-    st.sidebar.slider("Max hook length (sec)", 2.0, 30.0, step=0.5, key="hook_len_range_max")
+    st.sidebar.slider("Min hook length (sec)", float(MIN_DURATION_SECONDS), 30.0, step=0.5, key="hook_len_range_min")
+    st.sidebar.slider("Max hook length (sec)", float(MIN_DURATION_SECONDS), 30.0, step=0.5, key="hook_len_range_max")
     
     # Validate that min <= max
     if st.session_state["hook_len_range_min"] > st.session_state["hook_len_range_max"]:
@@ -529,7 +580,7 @@ if quick_scan_btn:
     if st.session_state.model is None:
         st.warning("⚠️ Please click 'Load Whisper Model' first!")
     else:
-        from broadcast_splitter import detect_broadcast_segments
+        from broadcast_splitter import detect_broadcast_segments, get_last_broadcast_segmentation_debug
 
         st.session_state["quick_scan_ready_for_full_run"] = True
         run_id = datetime.utcnow().strftime("%Y%m%d_%H%M%S") + "_" + uuid4().hex[:8]
@@ -540,6 +591,8 @@ if quick_scan_btn:
         qs_done = 0.0
         qs_total = max(1.0, float(len(input_paths) * 4))
         max_probe_segments = int(st.session_state.get("quick_scan_probe_segments", 8))
+        scan_max_segment_sec, scan_merge_gap_sec, _ = _broadcast_runtime_settings()
+        silence_cfg = _silence_runtime_settings()
 
         for file_idx, (src_type, name_or_path, maybe_bytes, youtube_info) in enumerate(input_paths, start=1):
             qs_done += 1.0
@@ -570,15 +623,22 @@ if quick_scan_btn:
                 cut_segment_to_wav(in_path, window_wav, w_start, w_end)
                 intervals, method_used, _ = detect_broadcast_segments(
                     window_wav,
-                    min_segment_sec=1.5,
-                    max_segment_sec=float(st.session_state["max_segment_s"]),
-                    merge_gap_sec=float(st.session_state["merge_gap_s"]),
+                    min_segment_sec=BROADCAST_MIN_SEGMENT_SEC,
+                    max_segment_sec=scan_max_segment_sec,
+                    merge_gap_sec=scan_merge_gap_sec,
                     chunk_sec=99999.0,
-                    silence_noise_db=st.session_state["noise_db"],
+                    silence_noise_db=silence_cfg["noise_db"],
                     silence_min_s=st.session_state["min_silence_s"],
                     silence_pad_s=st.session_state["pad_s"],
+                    silence_threshold_mode=silence_cfg["threshold_mode"],
+                    silence_margin_db=silence_cfg["margin_db"],
+                    silence_quick_test_mode=silence_cfg["quick_test_mode"],
+                    silence_quick_test_seconds=silence_cfg["quick_test_seconds"],
+                    silence_quick_test_retries=silence_cfg["quick_test_retries"],
                     prefer_method="vad" if st.session_state["broadcast_split_method"].startswith("VAD") else "energy",
                 )
+                split_debug = get_last_broadcast_segmentation_debug()
+                silence_debug = split_debug.get("silence_debug", {}) if isinstance(split_debug, dict) else {}
                 nonempty = 0
                 guesses = []
                 sampled_intervals = _sample_intervals(intervals, max_probe_segments)
@@ -619,6 +679,10 @@ if quick_scan_btn:
                     "probes_used": len(sampled_intervals),
                     "language_guess": max(set(guesses), key=guesses.count) if guesses else "unknown",
                     "estimated_total_clips": int(round(seg_per_min * (duration_sec / 60.0))),
+                    "noise_floor_db": silence_debug.get("noise_floor_db", None),
+                    "silence_thresh_db": silence_debug.get("silence_thresh_db", None),
+                    "margin_db": silence_debug.get("margin_db", None),
+                    "quick_test_attempts": len(silence_debug.get("quick_test", {}).get("attempts", [])) if isinstance(silence_debug, dict) else 0,
                 })
 
         _update_progress_bar(
@@ -786,7 +850,7 @@ if run_btn or st.session_state.pop("quick_scan_proceed", False):
                         })
                     
                     # Apply minimum duration filter
-                    min_duration = st.session_state["hook_len_range_min"]
+                    min_duration = max(float(st.session_state["hook_len_range_min"]), float(MIN_CLIP_DURATION_SECONDS))
                     candidates = filter_by_duration(candidates, min_duration=min_duration)
                     st.write(f"✂️ After {min_duration}s filter: {len(candidates)} hooks")
                     
@@ -823,6 +887,9 @@ if run_btn or st.session_state.pop("quick_scan_proceed", False):
                             dur = max(0.0, bb - aa)
                             refined_ok = False
                             # Keep the original reason from refinement (likely "too_short" from beat_refine.py)
+                        if dur < MIN_CLIP_DURATION_SECONDS:
+                            # Hard safety floor for all exported clips.
+                            continue
                         
                         # Get preference for bar snapping
                         prefer_bars = int(st.session_state.get("prefer_bars", 2))
@@ -1022,12 +1089,12 @@ if run_btn or st.session_state.pop("quick_scan_proceed", False):
                 # Mode: Broadcast Hunter (Mix)
                 # ----------------------------
                 else:
-                    from broadcast_splitter import detect_broadcast_segments
+                    from broadcast_splitter import detect_broadcast_segments, get_last_broadcast_segmentation_debug
 
                     export_without_transcript = bool(st.session_state.get("export_without_transcript", True))
-                    min_segment_sec = 1.5
-                    max_segment_sec = float(st.session_state["max_segment_s"])
-                    merge_gap_sec = float(st.session_state["merge_gap_s"])
+                    min_segment_sec = BROADCAST_MIN_SEGMENT_SEC
+                    max_segment_sec, merge_gap_sec, runtime_chunk_sec = _broadcast_runtime_settings()
+                    silence_cfg = _silence_runtime_settings()
                     prefer_method = "vad" if st.session_state["broadcast_split_method"].startswith("VAD") else "energy"
                     transcribe_segments = not export_without_transcript
 
@@ -1041,17 +1108,46 @@ if run_btn or st.session_state.pop("quick_scan_proceed", False):
                             min_segment_sec=min_seg,
                             max_segment_sec=max_seg,
                             merge_gap_sec=merge_gap_sec,
-                            chunk_sec=float(st.session_state["broadcast_chunk_s"]),
-                            silence_noise_db=st.session_state["noise_db"],
+                            chunk_sec=runtime_chunk_sec,
+                            silence_noise_db=silence_cfg["noise_db"],
                             silence_min_s=st.session_state["min_silence_s"],
                             silence_pad_s=st.session_state["pad_s"],
+                            silence_threshold_mode=silence_cfg["threshold_mode"],
+                            silence_margin_db=silence_cfg["margin_db"],
+                            silence_quick_test_mode=silence_cfg["quick_test_mode"],
+                            silence_quick_test_seconds=silence_cfg["quick_test_seconds"],
+                            silence_quick_test_retries=silence_cfg["quick_test_retries"],
                             prefer_method=prefer_method,
                         )
+                        split_debug = get_last_broadcast_segmentation_debug()
+                        silence_debug = split_debug.get("silence_debug", {}) if isinstance(split_debug, dict) else {}
                         st.write(f"✂️ Found {len(intervals)} segments via **{split_method_used}** (chunking={chunking_enabled})")
+                        if split_method_used == "silence" and isinstance(silence_debug, dict) and silence_debug:
+                            nf = silence_debug.get("noise_floor_db", None)
+                            thr = silence_debug.get("silence_thresh_db", None)
+                            margin = silence_debug.get("margin_db", None)
+                            st.info(
+                                "Silence auto-threshold: "
+                                f"noise_floor={nf} dB, threshold={thr} dB, margin={margin} dB"
+                            )
+                            warning_txt = str(silence_debug.get("warning", "") or "").strip()
+                            if warning_txt:
+                                st.warning(warning_txt)
+                            attempts = silence_debug.get("quick_test", {}).get("attempts", [])
+                            if attempts:
+                                with st.expander("Silence quick-test attempts", expanded=False):
+                                    st.dataframe(pd.DataFrame(attempts), use_container_width=True)
                         progress_state["total"] += float(max(len(intervals), 1))
 
                         diagnostics = _broadcast_diagnostics_template()
                         diagnostics["segments_total"] = len(intervals)
+                        if split_method_used == "silence" and isinstance(silence_debug, dict):
+                            diagnostics["silence_noise_floor_db"] = silence_debug.get("noise_floor_db", None)
+                            diagnostics["silence_thresh_db"] = silence_debug.get("silence_thresh_db", None)
+                            diagnostics["silence_margin_db"] = silence_debug.get("margin_db", None)
+                            diagnostics["silence_quick_test_attempts"] = len(
+                                silence_debug.get("quick_test", {}).get("attempts", [])
+                            )
                         progress_bar = st.progress(0)
                         source_rows = []
 
@@ -1064,7 +1160,7 @@ if run_btn or st.session_state.pop("quick_scan_proceed", False):
                                 )
                             a, b = float(a), float(b)
                             dur = max(0.0, b - a)
-                            if dur < min_seg:
+                            if dur < MIN_CLIP_DURATION_SECONDS:
                                 diagnostics["segments_too_short"] += 1
                                 continue
 
@@ -1115,7 +1211,8 @@ if run_btn or st.session_state.pop("quick_scan_proceed", False):
                                     in_path, session_dir, stem, a, b,
                                     st.session_state["export_format"],
                                     add_tail=False,
-                                    add_fades=False,
+                                    add_fades=True,
+                                    apply_zero_crossing=False,
                                 )
                                 txt_path = session_dir / f"{stem}.txt"
                                 json_path = session_dir / f"{stem}.json"
@@ -1204,7 +1301,7 @@ if run_btn or st.session_state.pop("quick_scan_proceed", False):
 
                     if split_method_used == "energy" and broadcast_diag["segments_exported"] == 0 and broadcast_diag["segments_total"] > 0:
                         st.warning("No clips exported on energy pass. Retrying once with relaxed thresholds...")
-                        relaxed_min = max(0.8, min_segment_sec * 0.7)
+                        relaxed_min = BROADCAST_MIN_SEGMENT_SEC
                         relaxed_max = min(90.0, max_segment_sec * 1.3)
                         source_rows, broadcast_diag, split_method_used = _run_broadcast_pass(
                             "retry",
@@ -1223,7 +1320,7 @@ if run_btn or st.session_state.pop("quick_scan_proceed", False):
                             encoding="utf-8",
                         )
                         if st.button("Retry with relaxed thresholds", key=f"retry_relaxed_{idx_file}"):
-                            relaxed_min = max(0.8, min_segment_sec * 0.7)
+                            relaxed_min = BROADCAST_MIN_SEGMENT_SEC
                             relaxed_max = min(90.0, max_segment_sec * 1.3)
                             source_rows, broadcast_diag, split_method_used = _run_broadcast_pass(
                                 "manual_retry",
@@ -1251,9 +1348,57 @@ if run_btn or st.session_state.pop("quick_scan_proceed", False):
         st.session_state.results = results
 
         if results:
+            result_df = pd.DataFrame(results)
             manifest_path = run_scope_dir / "manifest.csv"
-            pd.DataFrame(results).to_csv(manifest_path, index=False)
+            result_df.to_csv(manifest_path, index=False)
+            manifest_recording_path = run_scope_dir / "manifest_by_recording.csv"
+            manifest_length_path = run_scope_dir / "manifest_by_length_desc.csv"
+
+            if {"source", "start_sec"}.issubset(result_df.columns):
+                rec_cols = ["source", "start_sec"]
+                rec_asc = [True, True]
+                if "dur_sec" in result_df.columns:
+                    rec_cols.append("dur_sec")
+                    rec_asc.append(False)
+                if "clip" in result_df.columns:
+                    rec_cols.append("clip")
+                    rec_asc.append(True)
+                by_recording = result_df.sort_values(
+                    rec_cols,
+                    ascending=rec_asc,
+                    kind="stable",
+                )
+                by_recording.to_csv(manifest_recording_path, index=False)
+            else:
+                result_df.to_csv(manifest_recording_path, index=False)
+
+            if "dur_sec" in result_df.columns:
+                len_cols = ["dur_sec"]
+                len_asc = [False]
+                if "source" in result_df.columns:
+                    len_cols.append("source")
+                    len_asc.append(True)
+                if "start_sec" in result_df.columns:
+                    len_cols.append("start_sec")
+                    len_asc.append(True)
+                if "clip" in result_df.columns:
+                    len_cols.append("clip")
+                    len_asc.append(True)
+                by_length = result_df.sort_values(
+                    len_cols,
+                    ascending=len_asc,
+                    kind="stable",
+                )
+                by_length.to_csv(manifest_length_path, index=False)
+            else:
+                result_df.to_csv(manifest_length_path, index=False)
+
             st.session_state["manifest_path"] = str(manifest_path)
+            st.session_state["manifest_recording_path"] = str(manifest_recording_path)
+            st.session_state["manifest_length_path"] = str(manifest_length_path)
+        else:
+            st.session_state.pop("manifest_recording_path", None)
+            st.session_state.pop("manifest_length_path", None)
 
         if not results:
             status.update(label="⚠️ No clips found", state="error")
@@ -1476,9 +1621,63 @@ if "results" in st.session_state and st.session_state.results:
     df = pd.DataFrame(st.session_state.results)
     if "pick" not in df.columns:
         df["pick"] = True
+
+    table_sort_map: Dict[str, Tuple[List[str], List[bool]]] = {
+        "As captured": ([], []),
+    }
+    if {"source", "start_sec"}.issubset(df.columns):
+        table_rec_cols = ["source", "start_sec"]
+        table_rec_asc = [True, True]
+        if "dur_sec" in df.columns:
+            table_rec_cols.append("dur_sec")
+            table_rec_asc.append(False)
+        if "clip" in df.columns:
+            table_rec_cols.append("clip")
+            table_rec_asc.append(True)
+        table_sort_map["Recording order (source + time)"] = (
+            table_rec_cols,
+            table_rec_asc,
+        )
+    if "dur_sec" in df.columns:
+        table_len_cols = ["dur_sec"]
+        table_len_desc = [False]
+        table_len_asc = [True]
+        if "source" in df.columns:
+            table_len_cols.append("source")
+            table_len_desc.append(True)
+            table_len_asc.append(True)
+        if "start_sec" in df.columns:
+            table_len_cols.append("start_sec")
+            table_len_desc.append(True)
+            table_len_asc.append(True)
+        if "clip" in df.columns:
+            table_len_cols.append("clip")
+            table_len_desc.append(True)
+            table_len_asc.append(True)
+        table_sort_map["Length (longest first)"] = (
+            table_len_cols,
+            table_len_desc,
+        )
+        table_sort_map["Length (shortest first)"] = (
+            table_len_cols,
+            table_len_asc,
+        )
+
+    default_table_sort = "Recording order (source + time)" if "Recording order (source + time)" in table_sort_map else "As captured"
+    table_sort_label = st.selectbox(
+        "Table order",
+        list(table_sort_map.keys()),
+        index=list(table_sort_map.keys()).index(default_table_sort),
+        key="results_table_sort",
+    )
+    table_sort_cols, table_sort_asc = table_sort_map[table_sort_label]
+    if table_sort_cols:
+        df_view = df.sort_values(table_sort_cols, ascending=table_sort_asc, kind="stable")
+    else:
+        df_view = df.copy()
     
     edited = st.data_editor(
-        df,
+        df_view,
         use_container_width=True,
         hide_index=True,
         column_config={
@@ -1497,6 +1696,27 @@ if "results" in st.session_state and st.session_state.results:
     selected = edited[edited["pick"] == True].copy()
     st.write(f"**Selected:** {len(selected)} clips")
 
+    manifest_recording_path = Path(str(st.session_state.get("manifest_recording_path", "")))
+    manifest_length_path = Path(str(st.session_state.get("manifest_length_path", "")))
+    if manifest_recording_path.exists() or manifest_length_path.exists():
+        dl_manifest_col1, dl_manifest_col2 = st.columns(2)
+        if manifest_recording_path.exists():
+            with dl_manifest_col1:
+                _download_button_from_path(
+                    "⬇️ Download manifest (recording order)",
+                    manifest_recording_path,
+                    mime="text/csv",
+                    key="dl_manifest_recording_order",
+                )
+        if manifest_length_path.exists():
+            with dl_manifest_col2:
+                _download_button_from_path(
+                    "⬇️ Download manifest (length desc)",
+                    manifest_length_path,
+                    mime="text/csv",
+                    key="dl_manifest_length_desc",
+                )
+
     # Grouping controls
     col_group1, col_group2 = st.columns([1, 1])
     with col_group1:
@@ -1504,16 +1724,65 @@ if "results" in st.session_state and st.session_state.results:
         group_by = st.selectbox("Grouping", grouping_options, index=0, key="group_by")
     with col_group2:
         # Preview controls: sort + show all/paginated
-        sort_options = []
+        preview_sort_map: Dict[str, Tuple[List[str], List[bool]]] = {}
+        if {"source", "start_sec"}.issubset(selected.columns):
+            preview_rec_cols = ["source", "start_sec"]
+            preview_rec_asc = [True, True]
+            if "dur_sec" in selected.columns:
+                preview_rec_cols.append("dur_sec")
+                preview_rec_asc.append(False)
+            if "clip" in selected.columns:
+                preview_rec_cols.append("clip")
+                preview_rec_asc.append(True)
+            preview_sort_map["Recording order"] = (
+                preview_rec_cols,
+                preview_rec_asc,
+            )
+        if "dur_sec" in selected.columns:
+            preview_len_cols = ["dur_sec"]
+            preview_len_desc = [False]
+            preview_len_asc = [True]
+            if "source" in selected.columns:
+                preview_len_cols.append("source")
+                preview_len_desc.append(True)
+                preview_len_asc.append(True)
+            if "start_sec" in selected.columns:
+                preview_len_cols.append("start_sec")
+                preview_len_desc.append(True)
+                preview_len_asc.append(True)
+            if "clip" in selected.columns:
+                preview_len_cols.append("clip")
+                preview_len_desc.append(True)
+                preview_len_asc.append(True)
+            preview_sort_map["Length (longest first)"] = (
+                preview_len_cols,
+                preview_len_desc,
+            )
+            preview_sort_map["Length (shortest first)"] = (
+                preview_len_cols,
+                preview_len_asc,
+            )
         if "hook_score" in selected.columns:
-            sort_options.append("hook_score")
+            preview_sort_map["Hook score"] = (["hook_score"], [False])
+        if "jingle_score" in selected.columns:
+            preview_sort_map["Jingle score"] = (["jingle_score"], [False])
         if "energy" in selected.columns:
-            sort_options.append("energy")
-        sort_options = sort_options or ["clip"]
-        preview_sort = st.selectbox("Sort by", sort_options, index=0, key="preview_sort")
+            preview_sort_map["Energy"] = (["energy"], [False])
+        if "clip" in selected.columns:
+            preview_sort_map["Clip #"] = (["clip"], [True])
+        if not preview_sort_map:
+            preview_sort_map["As listed"] = ([], [])
 
-    if preview_sort in selected.columns:
-        selected = selected.sort_values(preview_sort, ascending=False, kind="stable")
+        preview_sort = st.selectbox(
+            "Sort by",
+            list(preview_sort_map.keys()),
+            index=0,
+            key="preview_sort",
+        )
+        preview_sort_cols, preview_sort_asc = preview_sort_map[preview_sort]
+
+    if preview_sort_cols:
+        selected = selected.sort_values(preview_sort_cols, ascending=preview_sort_asc, kind="stable")
 
     show_all_preview = st.checkbox("Show all selected clips", value=False, key="preview_show_all")
 
@@ -1544,7 +1813,8 @@ if "results" in st.session_state and st.session_state.results:
     with st.expander(title, expanded=True):
         if total_clips > 0:
             if groups:
-                for group_key, items in sorted(groups.items(), key=lambda x: -len(x[1])):
+                # Keep insertion order from selected_rows so preview sort drives group order too.
+                for group_key, items in groups.items():
                     if group_mode == "phrase":
                         group_title = f"📋 \"{group_key[:60]}...\" ({len(items)} clips)"
                     elif group_mode == "tag_theme":

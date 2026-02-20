@@ -36,7 +36,7 @@ except Exception:
     )
 
 from audio_detection import detect_audio_type
-from broadcast_splitter import detect_broadcast_segments
+from broadcast_splitter import detect_broadcast_segments, get_last_broadcast_segmentation_debug
 from downloaders import DownloadError, download_audio
 from hook_finder import ffmpeg_to_wav16k_mono, find_hooks, normalize_bpm_family
 from transcribe import transcribe_wav
@@ -69,6 +69,7 @@ os.environ.setdefault("TEMP", str(_runtime_temp))
 os.environ.setdefault("TMPDIR", str(_runtime_temp))
 
 _MODEL_CACHE: Dict[Tuple[str, str, str], Any] = {}
+MIN_EXPORT_SEGMENT_SEC = 4.0
 
 
 def _safe_stem(path: Path) -> str:
@@ -149,26 +150,51 @@ def _build_simple_intervals(
     min_silence_s: float,
     pad_s: float,
     min_segment_s: float,
+    silence_threshold_mode: str,
+    silence_margin_db: float,
+    silence_quick_test_enabled: bool,
+    silence_quick_test_seconds: float,
+    silence_quick_test_retries: int,
 ) -> Tuple[List[Tuple[float, float]], List[str]]:
     notes: List[str] = []
+    min_seg_floor = max(MIN_EXPORT_SEGMENT_SEC, float(min_segment_s))
     if split_mode == "Fixed length":
-        return fixed_length_intervals(src, segment_len=float(fixed_len_s)), notes
+        fixed_len = max(float(fixed_len_s), min_seg_floor)
+        return fixed_length_intervals(src, segment_len=fixed_len), notes
 
-    intervals = detect_non_silent_intervals(
+    intervals, silence_debug = detect_non_silent_intervals(
         src,
         noise_db=float(noise_db),
         min_silence_s=float(min_silence_s),
         pad_s=float(pad_s),
-        min_segment_s=float(min_segment_s),
+        min_segment_s=min_seg_floor,
+        threshold_mode=silence_threshold_mode,
+        margin_db=float(silence_margin_db),
+        quick_test_mode=bool(silence_quick_test_enabled),
+        quick_test_seconds=float(silence_quick_test_seconds),
+        quick_test_retries=int(silence_quick_test_retries),
+        return_debug=True,
     )
+    if isinstance(silence_debug, dict):
+        nf = silence_debug.get("noise_floor_db", None)
+        thr = silence_debug.get("silence_thresh_db", None)
+        margin = silence_debug.get("margin_db", None)
+        notes.append(f"Silence diagnostics: noise_floor={nf} dB, threshold={thr} dB, margin={margin} dB")
+        warn = str(silence_debug.get("warning", "") or "").strip()
+        if warn:
+            notes.append(f"Silence warning: {warn}")
+        attempts = silence_debug.get("quick_test", {}).get("attempts", [])
+        if attempts:
+            notes.append(f"Silence quick-test attempts: {len(attempts)}")
     # Guardrail: if silence splitting returns a single near-fullfile segment, fallback.
     duration = float(get_duration_seconds(src))
     if len(intervals) <= 1 and duration > max(120.0, float(fixed_len_s) * 3.0):
-        fallback_len = max(6.0, min(20.0, float(fixed_len_s)))
+        fallback_len = max(min_seg_floor, min(20.0, float(fixed_len_s)))
         fallback = fixed_length_intervals(src, segment_len=fallback_len)
         if len(fallback) > len(intervals):
             intervals = fallback
             notes.append(f"Fallback to fixed-length split ({fallback_len:.1f}s) due sparse silence boundaries.")
+    intervals = [(float(a), float(b)) for a, b in intervals if (float(b) - float(a)) >= min_seg_floor]
     return intervals, notes
 
 
@@ -198,6 +224,11 @@ def run_pipeline(
     min_silence_s: float,
     pad_s: float,
     min_segment_s: float,
+    silence_threshold_mode: str,
+    silence_margin_db: float,
+    silence_quick_test_enabled: bool,
+    silence_quick_test_seconds: float,
+    silence_quick_test_retries: int,
     song_hook_min: float,
     song_hook_max: float,
     song_prefer_len: float,
@@ -267,11 +298,14 @@ def run_pipeline(
             interval_specs: List[Dict[str, float]] = []
             mode_detail = processing_mode
             mode_broadcast = processing_mode.startswith("Broadcast")
+            min_seg_floor = max(MIN_EXPORT_SEGMENT_SEC, float(min_segment_s))
 
             if processing_mode.startswith("Song"):
+                hook_min = max(MIN_EXPORT_SEGMENT_SEC, float(song_hook_min))
+                hook_max = max(hook_min, float(song_hook_max))
                 hooks, global_bpm, global_conf = find_hooks(
                     wav16,
-                    hook_len_range=(float(song_hook_min), float(song_hook_max)),
+                    hook_len_range=(hook_min, hook_max),
                     prefer_len=float(song_prefer_len),
                     hop_s=1.0,
                     topn=int(song_topn),
@@ -292,17 +326,38 @@ def run_pipeline(
             elif processing_mode.startswith("Broadcast"):
                 intervals, split_method, chunking_enabled = detect_broadcast_segments(
                     wav16,
-                    min_segment_sec=max(1.5, float(min_segment_s)),
+                    min_segment_sec=min_seg_floor,
                     max_segment_sec=float(broadcast_max_segment),
                     merge_gap_sec=float(broadcast_merge_gap),
                     chunk_sec=float(broadcast_chunk_s),
                     silence_noise_db=float(noise_db),
                     silence_min_s=float(min_silence_s),
                     silence_pad_s=float(pad_s),
+                    silence_threshold_mode=("auto" if str(silence_threshold_mode).startswith("Auto") else "manual"),
+                    silence_margin_db=float(silence_margin_db),
+                    silence_quick_test_mode=bool(silence_quick_test_enabled),
+                    silence_quick_test_seconds=float(silence_quick_test_seconds),
+                    silence_quick_test_retries=int(silence_quick_test_retries),
                     prefer_method=("vad" if str(broadcast_method).startswith("VAD") else "energy"),
                 )
                 interval_specs = [{"start": float(a), "end": float(b), "bpm": 0.0, "score": 0.0} for a, b in intervals]
                 mode_detail = f"broadcast:{split_method}, chunking={chunking_enabled}"
+                if split_method == "silence":
+                    split_debug = get_last_broadcast_segmentation_debug()
+                    silence_debug = split_debug.get("silence_debug", {}) if isinstance(split_debug, dict) else {}
+                    if isinstance(silence_debug, dict):
+                        nf = silence_debug.get("noise_floor_db", None)
+                        thr = silence_debug.get("silence_thresh_db", None)
+                        margin = silence_debug.get("margin_db", None)
+                        notes.append(
+                            f"{src.name}: silence diagnostics noise_floor={nf} dB, threshold={thr} dB, margin={margin} dB"
+                        )
+                        warn = str(silence_debug.get("warning", "") or "").strip()
+                        if warn:
+                            notes.append(f"{src.name}: silence warning: {warn}")
+                        attempts = silence_debug.get("quick_test", {}).get("attempts", [])
+                        if attempts:
+                            notes.append(f"{src.name}: silence quick-test attempts={len(attempts)}")
             else:
                 simple_intervals, simple_notes = _build_simple_intervals(
                     src,
@@ -311,11 +366,21 @@ def run_pipeline(
                     noise_db=float(noise_db),
                     min_silence_s=float(min_silence_s),
                     pad_s=float(pad_s),
-                    min_segment_s=float(min_segment_s),
+                    min_segment_s=min_seg_floor,
+                    silence_threshold_mode=("auto" if str(silence_threshold_mode).startswith("Auto") else "manual"),
+                    silence_margin_db=float(silence_margin_db),
+                    silence_quick_test_enabled=bool(silence_quick_test_enabled),
+                    silence_quick_test_seconds=float(silence_quick_test_seconds),
+                    silence_quick_test_retries=int(silence_quick_test_retries),
                 )
                 interval_specs = [{"start": float(a), "end": float(b), "bpm": 0.0, "score": 0.0} for a, b in simple_intervals]
                 notes.extend(simple_notes)
                 mode_detail = f"simple:{simple_split_mode}"
+            interval_specs = [
+                spec
+                for spec in interval_specs
+                if (float(spec.get("end", 0.0)) - float(spec.get("start", 0.0))) >= min_seg_floor
+            ]
 
             # Guardrail: avoid exporting a single full-file clip on long files.
             if (
@@ -327,7 +392,7 @@ def run_pipeline(
                 first_dur = max(0.0, float(first.get("end", 0.0)) - float(first.get("start", 0.0)))
                 if first_dur >= src_dur * 0.90:
                     fallback_len = min(
-                        max(8.0, float(fixed_len_s)),
+                        max(min_seg_floor, 8.0, float(fixed_len_s)),
                         float(broadcast_max_segment),
                     )
                     fallback_intervals = fixed_length_intervals(src, segment_len=fallback_len)
@@ -357,7 +422,7 @@ def run_pipeline(
                 a = float(spec["start"])
                 b = float(spec["end"])
                 dur = max(0.0, b - a)
-                if dur <= 0.0:
+                if dur < min_seg_floor:
                     continue
 
                 state["done"] += 1.0
@@ -525,8 +590,8 @@ with gr.Blocks(title="The Sample Machine - Gradio") as demo:
         lang_in = gr.Dropdown(choices=["Auto", "da", "en"], value="Auto", label="Language")
 
     with gr.Accordion("Song Hunter Settings", open=False):
-        song_min_in = gr.Slider(2, 30, value=4, step=0.5, label="Min hook length (sec)")
-        song_max_in = gr.Slider(2, 30, value=15, step=0.5, label="Max hook length (sec)")
+        song_min_in = gr.Slider(4, 30, value=4, step=0.5, label="Min hook length (sec)")
+        song_max_in = gr.Slider(4, 30, value=15, step=0.5, label="Max hook length (sec)")
         song_pref_in = gr.Slider(2, 24, value=8, step=0.5, label="Preferred length (sec)")
         song_topn_in = gr.Slider(3, 60, value=12, step=1, label="Top N hooks")
         song_gap_in = gr.Slider(0, 10, value=2, step=0.5, label="Min gap between hooks (sec)")
@@ -539,9 +604,9 @@ with gr.Blocks(title="The Sample Machine - Gradio") as demo:
             value="VAD-first (recommended)",
             label="Split method",
         )
-        broadcast_max_segment_in = gr.Slider(10, 120, value=45, step=1, label="Max segment (sec)")
-        broadcast_merge_gap_in = gr.Slider(0.1, 1.0, value=0.35, step=0.05, label="Merge gap (sec)")
-        broadcast_chunk_in = gr.Slider(300, 1200, value=600, step=60, label="Chunk size (sec)")
+        broadcast_max_segment_in = gr.Slider(10, 1800, value=45, step=5, label="Max segment (sec)")
+        broadcast_merge_gap_in = gr.Slider(0.1, 3.0, value=0.35, step=0.05, label="Merge gap (sec)")
+        broadcast_chunk_in = gr.Slider(300, 3600, value=600, step=60, label="Chunk size (sec)")
         broadcast_no_transcript_in = gr.Checkbox(value=True, label="Export without transcript (faster)")
 
     with gr.Accordion("Simple Split Settings", open=False):
@@ -550,11 +615,20 @@ with gr.Blocks(title="The Sample Machine - Gradio") as demo:
             value="Silence-aware",
             label="Simple split mode",
         )
-        fixed_len_in = gr.Slider(2, 120, value=8, step=1, label="Fixed length (sec)")
-        noise_db_in = gr.Slider(-60, -10, value=-35, step=1, label="Silence threshold (dB)")
+        fixed_len_in = gr.Slider(4, 120, value=8, step=1, label="Fixed length (sec)")
+        silence_threshold_mode_in = gr.Dropdown(
+            choices=["Auto (noise floor + margin)", "Manual threshold (legacy)"],
+            value="Auto (noise floor + margin)",
+            label="Silence threshold mode",
+        )
+        silence_margin_in = gr.Slider(4, 16, value=10, step=0.5, label="Auto margin (dB)")
+        noise_db_in = gr.Slider(-60, -10, value=-35, step=1, label="Manual silence threshold (dB)")
         min_silence_in = gr.Slider(0.1, 3.0, value=0.7, step=0.1, label="Min silence (sec)")
         pad_in = gr.Slider(0.0, 1.0, value=0.15, step=0.05, label="Padding (sec)")
-        min_segment_in = gr.Slider(0.3, 8.0, value=1.5, step=0.1, label="Min segment (sec)")
+        min_segment_in = gr.Slider(4.0, 12.0, value=4.0, step=0.5, label="Min segment (sec)")
+        silence_quick_test_in = gr.Checkbox(value=True, label="Quick test mode (first 120s)")
+        silence_quick_test_seconds_in = gr.Slider(30, 300, value=120, step=10, label="Quick test window (sec)")
+        silence_quick_test_retries_in = gr.Slider(1, 3, value=3, step=1, label="Quick test retries")
 
     run_btn = gr.Button("Process", variant="primary")
     status_out = gr.Markdown(label="Status")
@@ -591,6 +665,11 @@ with gr.Blocks(title="The Sample Machine - Gradio") as demo:
             min_silence_in,
             pad_in,
             min_segment_in,
+            silence_threshold_mode_in,
+            silence_margin_in,
+            silence_quick_test_in,
+            silence_quick_test_seconds_in,
+            silence_quick_test_retries_in,
             song_min_in,
             song_max_in,
             song_pref_in,

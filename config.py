@@ -21,8 +21,8 @@ OUTPUT_ROOT: Path = Path(
 
 # Anti-overlap and filter thresholds
 OVERLAP_THRESHOLD: float = 0.30  # 30% overlap threshold for duplicate detection
-MIN_DURATION_SECONDS: float = 4.0  # Minimum clip duration for initial hook detection
-MIN_CLIP_DURATION_SECONDS: float = 2.0  # Minimum duration after refinement (shorter clips rejected)
+MIN_DURATION_SECONDS: float = 4.0  # Hard floor for exported clips/loops
+MIN_CLIP_DURATION_SECONDS: float = 4.0  # Minimum duration after refinement (shorter clips rejected)
 DECAY_TAIL_DURATION: float = 0.75  # Extra audio tail for loops (seconds)
 MAX_SLUG_LENGTH: int = 24  # Maximum characters for slug in filename
 
@@ -53,12 +53,18 @@ DEFAULTS: Dict[str, Any] = {
     "device": "cpu",
     "compute_type": "int8",
     "noise_db": -28.0,
+    "silence_threshold_mode": "Auto (noise floor + margin)",
+    "silence_margin_db": 10.0,
+    "silence_quick_test_enabled": True,
+    "silence_quick_test_seconds": 120.0,
+    "silence_quick_test_retries": 3,
     "min_silence_s": 0.4,
     "pad_s": 0.15,
-    "min_segment_s": 1.5,
+    "min_segment_s": 4.0,
     "max_segment_s": 45.0,
     "merge_gap_s": 0.35,
     "broadcast_chunk_s": 600.0,
+    "broadcast_profile": "Balanced",
     "broadcast_split_method": "VAD-first (recommended)",
     "export_without_transcript": True,
     "quick_scan_window_sec": 75.0,

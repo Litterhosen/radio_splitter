@@ -104,7 +104,8 @@ def export_clip_with_tail(
     b: float, 
     want_format: str,
     add_tail: bool = True,
-    add_fades: bool = True
+    add_fades: bool = True,
+    apply_zero_crossing: bool = True,
 ) -> Tuple[Path, Dict[str, Any]]:
     """
     Export clip with optional decay tail and fades.
@@ -132,7 +133,7 @@ def export_clip_with_tail(
             fade_in_ms=15.0,   # Standard fade-in duration in milliseconds
             fade_out_ms=15.0,  # Standard fade-out duration in milliseconds
             tail_sec=tail_duration,
-            apply_zero_crossing=True,
+            apply_zero_crossing=bool(apply_zero_crossing),
             bitrate="192k",
             is_wav=is_wav
         )
