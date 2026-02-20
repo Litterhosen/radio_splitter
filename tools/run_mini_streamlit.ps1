@@ -1,6 +1,8 @@
 param(
     [string]$ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path,
-    [int]$Port = 8502
+    [int]$Port = 8502,
+    [string]$Address = "127.0.0.1",
+    [switch]$Headless
 )
 
 $ErrorActionPreference = "Stop"
@@ -16,7 +18,8 @@ $py = if (Test-Path $venvPy) { $venvPy } else { "python" }
 
 Push-Location $ProjectRoot
 try {
-    & $py -m streamlit run $app --server.port $Port
+    $headlessValue = if ($Headless.IsPresent) { "true" } else { "false" }
+    & $py -m streamlit run $app --server.port $Port --server.address $Address --server.headless $headlessValue
 }
 finally {
     Pop-Location
