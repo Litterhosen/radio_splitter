@@ -292,7 +292,7 @@ with st.sidebar:
 
     st.divider()
     st.subheader("Clips (speech)")
-    min_clip_sec = st.slider("Min clip length (sec)", 0.5, 10.0, 2.0, 0.5)
+    min_clip_sec = st.slider("Min clip length (sec)", 4.0, 12.0, 4.0, 0.5)
     pad_sec = st.slider("Pad around clip (sec)", 0.0, 2.0, 0.25, 0.05)
     fade_ms = st.slider("Fade (ms)", 0, 300, 30, 10)
 

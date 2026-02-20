@@ -5,6 +5,8 @@ from pathlib import Path
 import numpy as np
 import librosa
 
+HARD_MIN_LOOP_SEC = 4.0
+
 
 def _safe_tempo_scalar(tempo) -> float:
     if hasattr(tempo, "__len__"):
@@ -56,7 +58,7 @@ def export_bar_loops(
         start_t = float(beat_times[i])
         end_t = float(beat_times[i + beats_in_loop])
         dur = end_t - start_t
-        if dur <= 0.5:
+        if dur < HARD_MIN_LOOP_SEC:
             continue
         s = max(0, int(start_t * sr))
         e = min(len(y_mono), int(end_t * sr))

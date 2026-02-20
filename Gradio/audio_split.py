@@ -1,17 +1,169 @@
 import re
+import math
 import numpy as np
 import librosa
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Dict, Any, Union
 
 from rs_utils import find_ffmpeg, find_ffprobe, run_cmd
+
+MIN_SEGMENT_SECONDS = 4.0
+AUTO_THRESHOLD_FALLBACK_DB = -25.0
+AUTO_THRESHOLD_CLAMP_MIN_DB = -55.0
+AUTO_THRESHOLD_CLAMP_MAX_DB = -18.0
+HIGH_NOISE_FLOOR_WARNING_DB = -20.0
+
+_LAST_NON_SILENT_DEBUG: Dict[str, Any] = {}
 
 
 @dataclass
 class SilenceEvent:
     start: float
     end: float
+
+
+def get_last_non_silent_debug() -> Dict[str, Any]:
+    """Return diagnostics from the most recent detect_non_silent_intervals call."""
+    return dict(_LAST_NON_SILENT_DEBUG)
+
+
+def _clamp(v: float, lo: float, hi: float) -> float:
+    return max(float(lo), min(float(hi), float(v)))
+
+
+def _select_sample_offsets(duration: float, sample_seconds: float, windows: int) -> List[Tuple[float, float]]:
+    if duration <= 0.0:
+        return []
+    total = max(1.0, min(float(sample_seconds), float(duration)))
+    n = max(1, int(windows))
+    window_dur = max(2.0, total / float(n))
+    if duration <= window_dur:
+        return [(0.0, float(duration))]
+    max_start = max(0.0, float(duration) - window_dur)
+    starts = np.linspace(0.0, max_start, num=n)
+    return [(float(s), float(min(duration, s + window_dur))) for s in starts]
+
+
+def estimate_noise_floor_db(
+    audio_path: Path,
+    sample_seconds: float = 60.0,
+    method: str = "rms_percentile",
+    percentile: float = 20.0,
+    frame_ms: float = 50.0,
+    sample_windows: int = 3,
+) -> float:
+    """
+    Estimate noise floor in dBFS using robust RMS percentile frames.
+    """
+    if method != "rms_percentile":
+        raise ValueError(f"Unsupported method: {method}")
+
+    duration = get_duration_seconds(audio_path)
+    if duration <= 0:
+        return float(AUTO_THRESHOLD_FALLBACK_DB)
+
+    offsets = _select_sample_offsets(duration, sample_seconds=sample_seconds, windows=sample_windows)
+    all_frame_db: List[np.ndarray] = []
+    sr = 16000
+    frame_len = max(1, int(sr * (float(frame_ms) / 1000.0)))
+    p = float(_clamp(percentile, 1.0, 99.0))
+
+    for start_s, end_s in offsets:
+        seg_dur = max(0.0, float(end_s) - float(start_s))
+        if seg_dur <= 0.0:
+            continue
+        try:
+            y, _ = librosa.load(str(audio_path), sr=sr, mono=True, offset=float(start_s), duration=float(seg_dur))
+        except Exception:
+            continue
+        if y is None or y.size < frame_len:
+            continue
+        n_frames = int(y.size // frame_len)
+        if n_frames <= 0:
+            continue
+        y_trim = y[: n_frames * frame_len]
+        frames = y_trim.reshape(n_frames, frame_len)
+        rms = np.sqrt(np.mean(frames * frames, axis=1) + 1e-12)
+        db = 20.0 * np.log10(np.clip(rms, 1e-12, None))
+        all_frame_db.append(db.astype(np.float32))
+
+    if not all_frame_db:
+        return float(AUTO_THRESHOLD_FALLBACK_DB)
+
+    frame_db = np.concatenate(all_frame_db, axis=0)
+    noise_floor_db = float(np.percentile(frame_db, p))
+    if not math.isfinite(noise_floor_db):
+        return float(AUTO_THRESHOLD_FALLBACK_DB)
+    return float(noise_floor_db)
+
+
+def _detect_non_silent_intervals_with_threshold(
+    audio_path: Path,
+    threshold_db: float,
+    min_silence_s: float,
+    pad_s: float,
+    min_segment_s: float,
+    *,
+    duration_limit_s: Optional[float] = None,
+) -> List[Tuple[float, float]]:
+    ffmpeg = find_ffmpeg()
+    full_dur = get_duration_seconds(audio_path)
+    if full_dur <= 0:
+        return []
+
+    analysis_dur = float(full_dur)
+    if duration_limit_s is not None and duration_limit_s > 0.0:
+        analysis_dur = min(analysis_dur, float(duration_limit_s))
+    if analysis_dur <= 0.0:
+        return []
+
+    thr = float(threshold_db)
+    min_sil = max(0.05, float(min_silence_s))
+    pad = max(0.0, float(pad_s))
+    min_seg = max(MIN_SEGMENT_SECONDS, float(min_segment_s))
+
+    cmd = [ffmpeg, "-hide_banner", "-nostats"]
+    if analysis_dur < full_dur:
+        cmd.extend(["-t", f"{analysis_dur:.3f}"])
+    cmd.extend(
+        [
+            "-i",
+            str(audio_path),
+            "-af",
+            f"silencedetect=noise={thr}dB:d={min_sil}",
+            "-f",
+            "null",
+            "-",
+        ]
+    )
+    r = run_cmd(cmd, check=False)
+    silences = _parse_silencedetect(r.err)
+
+    intervals: List[Tuple[float, float]] = []
+    cur = 0.0
+    for s in silences:
+        a = cur
+        b = max(cur, float(s.start))
+        if (b - a) >= min_seg:
+            intervals.append((max(0.0, a - pad), min(analysis_dur, b + pad)))
+        cur = max(cur, float(s.end))
+
+    if (analysis_dur - cur) >= min_seg:
+        intervals.append((max(0.0, cur - pad), analysis_dur))
+
+    intervals.sort()
+    merged: List[List[float]] = []
+    for a, b in intervals:
+        if not merged:
+            merged.append([a, b])
+        else:
+            pa, pb = merged[-1]
+            if a <= pb:
+                merged[-1][1] = max(pb, b)
+            else:
+                merged.append([a, b])
+    return [(float(a), float(b)) for a, b in merged if (float(b) - float(a)) >= min_seg]
 
 
 def get_duration_seconds(audio_path: Path) -> float:
@@ -30,14 +182,17 @@ def get_duration_seconds(audio_path: Path) -> float:
 
 def fixed_length_intervals(audio_path: Path, segment_len: float) -> List[Tuple[float, float]]:
     dur = get_duration_seconds(audio_path)
-    if dur <= 0:
+    if dur <= 0 or dur < MIN_SEGMENT_SECONDS:
         return []
-    seg = max(0.5, float(segment_len))
+    seg = max(MIN_SEGMENT_SECONDS, float(segment_len))
     out = []
     t = 0.0
     while t < dur:
         out.append((t, min(dur, t + seg)))
         t += seg
+    if len(out) >= 2 and (out[-1][1] - out[-1][0]) < MIN_SEGMENT_SECONDS:
+        out[-2] = (out[-2][0], out[-1][1])
+        out.pop()
     return out
 
 
@@ -71,57 +226,149 @@ def detect_non_silent_intervals(
     min_silence_s: float = 0.7,
     pad_s: float = 0.15,
     min_segment_s: float = 1.2,
-) -> List[Tuple[float, float]]:
+    threshold_mode: str = "auto",
+    margin_db: float = 10.0,
+    threshold_clamp_min_db: float = AUTO_THRESHOLD_CLAMP_MIN_DB,
+    threshold_clamp_max_db: float = AUTO_THRESHOLD_CLAMP_MAX_DB,
+    noise_sample_seconds: float = 60.0,
+    noise_percentile: float = 20.0,
+    noise_frame_ms: float = 50.0,
+    noise_sample_windows: int = 3,
+    quick_test_mode: bool = True,
+    quick_test_seconds: float = 120.0,
+    quick_test_retries: int = 3,
+    quick_test_margin_step_db: float = 2.0,
+    quick_test_min_silence_factor: float = 0.85,
+    return_debug: bool = False,
+) -> Union[List[Tuple[float, float]], Tuple[List[Tuple[float, float]], Dict[str, Any]]]:
     """
     Returns non-silent intervals by using ffmpeg silencedetect and then inverting silence regions.
+    Supports automatic thresholding based on estimated noise floor and quick-test retries.
     """
-    ffmpeg = find_ffmpeg()
     dur = get_duration_seconds(audio_path)
+    global _LAST_NON_SILENT_DEBUG
+    debug: Dict[str, Any] = {
+        "threshold_mode": str(threshold_mode),
+        "noise_floor_db": None,
+        "silence_thresh_db": None,
+        "margin_db": None,
+        "threshold_clamp_min_db": float(threshold_clamp_min_db),
+        "threshold_clamp_max_db": float(threshold_clamp_max_db),
+        "threshold_fallback_used": False,
+        "warning": "",
+        "quick_test": {"enabled": bool(quick_test_mode), "attempts": []},
+        "segments_found": 0,
+    }
     if dur <= 0:
+        _LAST_NON_SILENT_DEBUG = dict(debug)
+        if return_debug:
+            return [], dict(debug)
         return []
 
-    thr = float(noise_db)
-    min_sil = float(min_silence_s)
-    pad = max(0.0, float(pad_s))
-    min_seg = max(0.1, float(min_segment_s))
+    mode = str(threshold_mode or "auto").strip().lower()
+    auto_mode = mode.startswith("auto")
+    min_sil = max(0.05, float(min_silence_s))
+    min_seg = max(MIN_SEGMENT_SECONDS, float(min_segment_s))
+    threshold_db = float(noise_db)
+    margin = float(margin_db)
+    noise_floor_db: Optional[float] = None
 
-    r = run_cmd([
-        ffmpeg, "-hide_banner", "-nostats",
-        "-i", str(audio_path),
-        "-af", f"silencedetect=noise={thr}dB:d={min_sil}",
-        "-f", "null", "-"
-    ], check=False)
-
-    silences = _parse_silencedetect(r.err)
-
-    # Invert silence → non-silent
-    intervals = []
-    cur = 0.0
-    for s in silences:
-        a = cur
-        b = max(cur, s.start)
-        if (b - a) >= min_seg:
-            intervals.append((max(0.0, a - pad), min(dur, b + pad)))
-        cur = max(cur, s.end)
-
-    # tail
-    if (dur - cur) >= min_seg:
-        intervals.append((max(0.0, cur - pad), dur))
-
-    # Merge overlaps caused by padding
-    intervals.sort()
-    merged = []
-    for a, b in intervals:
-        if not merged:
-            merged.append([a, b])
+    if auto_mode:
+        noise_floor_db = estimate_noise_floor_db(
+            audio_path,
+            sample_seconds=float(noise_sample_seconds),
+            method="rms_percentile",
+            percentile=float(noise_percentile),
+            frame_ms=float(noise_frame_ms),
+            sample_windows=int(noise_sample_windows),
+        )
+        debug["noise_floor_db"] = round(float(noise_floor_db), 3)
+        if float(noise_floor_db) > HIGH_NOISE_FLOOR_WARNING_DB:
+            threshold_db = float(AUTO_THRESHOLD_FALLBACK_DB)
+            debug["threshold_fallback_used"] = True
+            debug["warning"] = (
+                f"High noise floor detected ({noise_floor_db:.2f} dBFS). "
+                f"Using fallback threshold {AUTO_THRESHOLD_FALLBACK_DB:.1f} dB."
+            )
         else:
-            pa, pb = merged[-1]
-            if a <= pb:
-                merged[-1][1] = max(pb, b)
-            else:
-                merged.append([a, b])
+            threshold_db = _clamp(
+                float(noise_floor_db) + margin,
+                float(threshold_clamp_min_db),
+                float(threshold_clamp_max_db),
+            )
+        debug["margin_db"] = round(margin, 3)
 
-    return [(float(a), float(b)) for a, b in merged]
+    test_attempts: List[Dict[str, Any]] = []
+    if bool(quick_test_mode):
+        test_limit = min(float(dur), max(5.0, float(quick_test_seconds)))
+        retry_count = max(1, int(quick_test_retries))
+        trial_margin = float(margin)
+        trial_min_sil = float(min_sil)
+        trial_threshold = float(threshold_db)
+
+        for attempt in range(1, retry_count + 1):
+            if auto_mode and not bool(debug["threshold_fallback_used"]) and noise_floor_db is not None:
+                trial_threshold = _clamp(
+                    float(noise_floor_db) + float(trial_margin),
+                    float(threshold_clamp_min_db),
+                    float(threshold_clamp_max_db),
+                )
+            trial_intervals = _detect_non_silent_intervals_with_threshold(
+                audio_path,
+                threshold_db=trial_threshold,
+                min_silence_s=trial_min_sil,
+                pad_s=float(pad_s),
+                min_segment_s=min_seg,
+                duration_limit_s=test_limit,
+            )
+            attempt_meta = {
+                "attempt": int(attempt),
+                "duration_limit_s": round(test_limit, 3),
+                "silence_thresh_db": round(float(trial_threshold), 3),
+                "min_silence_s": round(float(trial_min_sil), 3),
+                "margin_db": round(float(trial_margin), 3) if auto_mode else None,
+                "segments_found": int(len(trial_intervals)),
+            }
+            test_attempts.append(attempt_meta)
+            if trial_intervals:
+                threshold_db = float(trial_threshold)
+                min_sil = float(trial_min_sil)
+                margin = float(trial_margin)
+                break
+
+            if auto_mode and not bool(debug["threshold_fallback_used"]):
+                trial_margin = max(2.0, float(trial_margin) - abs(float(quick_test_margin_step_db)))
+            trial_min_sil = max(0.15, float(trial_min_sil) * float(quick_test_min_silence_factor))
+
+        if test_attempts and test_attempts[-1]["segments_found"] == 0:
+            # Keep the final retry values even if test still found 0, then run full-file pass.
+            threshold_db = float(test_attempts[-1]["silence_thresh_db"])
+            min_sil = float(test_attempts[-1]["min_silence_s"])
+            if auto_mode and test_attempts[-1]["margin_db"] is not None:
+                margin = float(test_attempts[-1]["margin_db"])
+
+    intervals = _detect_non_silent_intervals_with_threshold(
+        audio_path,
+        threshold_db=threshold_db,
+        min_silence_s=min_sil,
+        pad_s=float(pad_s),
+        min_segment_s=min_seg,
+        duration_limit_s=None,
+    )
+
+    debug["silence_thresh_db"] = round(float(threshold_db), 3)
+    if auto_mode:
+        debug["margin_db"] = round(float(margin), 3)
+    debug["quick_test"] = {
+        "enabled": bool(quick_test_mode),
+        "attempts": test_attempts,
+    }
+    debug["segments_found"] = int(len(intervals))
+    _LAST_NON_SILENT_DEBUG = dict(debug)
+
+    if return_debug:
+        return intervals, dict(debug)
+    return intervals
 
 
 def cut_segment_to_wav(src_path: Path, out_path: Path, start_s: float, end_s: float):
