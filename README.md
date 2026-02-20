@@ -49,6 +49,7 @@ Se **MERGE_TIL_MAIN.md** for guide til at gøre denne version til main.
 
 ## 📋 Deployment Guides
 
+- 🌍 **PUBLISH_STREAMLIT_GRADIO.md** - Public sharing for Streamlit + Gradio
 - 🇩🇰 **HURTIG_LØSNING.md** - Quick Danish guide
 - 🔧 **STREAMLIT_ACCESS_TROUBLESHOOTING.md** - Troubleshooting
 - 🤖 **STREAMLIT_MODEL_SETUP_1_BY_1.md** - Model setup én ad gangen
@@ -89,6 +90,9 @@ streamlit run app_main.py
 ```powershell
 # Fra projektmappen:
 cd C:\Users\brian\Programmering\radio_splitter2
+
+# Installer alt (main + gradio miljøer)
+powershell -ExecutionPolicy Bypass -File tools\install_apps.ps1 -SmokeTest
 
 # Main Streamlit
 powershell -ExecutionPolicy Bypass -File tools\run_main_streamlit.ps1 -Port 8501
