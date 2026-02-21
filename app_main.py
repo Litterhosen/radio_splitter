@@ -494,11 +494,9 @@ with tab_link:
                 st.info("ℹ️ **Streamlit Cloud note:** some YouTube downloads require Node.js; Streamlit Cloud runtimes may not provide it.")
             
             # Show next steps in a structured way
-            if hasattr(e, 'error_code') and e.error_code:
-                from downloaders import classify_error, check_js_runtime
-                _, _, next_steps = classify_error(str(e.last_error) if e.last_error else "", check_js_runtime() is not None)
+            if getattr(e, "next_steps", None):
                 st.info("**Next Steps:**")
-                st.markdown(next_steps)
+                st.markdown(e.next_steps)
             
             # Show full log in expander
             if e.log_file:
