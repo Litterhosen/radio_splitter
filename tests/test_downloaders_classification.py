@@ -16,8 +16,8 @@ def test_detect_js_runtimes_and_check_prefers_node():
             "bun": None,
         }.get(name)
         runtimes = detect_js_runtimes()
-        assert runtimes["node"].endswith("node.exe")
-        assert runtimes["deno"].endswith("deno.exe")
+        assert runtimes["node"]["path"].endswith("node.exe")
+        assert runtimes["deno"]["path"].endswith("deno.exe")
         assert check_js_runtime().endswith("node.exe")
 
 

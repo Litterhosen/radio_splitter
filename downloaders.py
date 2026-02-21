@@ -5,7 +5,7 @@ import shutil
 import subprocess
 import os
 from datetime import datetime
-from typing import Tuple, Optional, Dict, List
+from typing import Tuple, Optional, Dict, List, Any
 from enum import Enum
 
 
@@ -81,19 +81,25 @@ def check_js_runtime() -> Optional[str]:
     """
     runtimes = detect_js_runtimes()
     if "node" in runtimes:
-        return runtimes["node"]
+        node_path = runtimes["node"].get("path", "")
+        return str(node_path) if node_path else None
     if runtimes:
-        return next(iter(runtimes.values()))
+        first_cfg = next(iter(runtimes.values()))
+        first_path = first_cfg.get("path", "")
+        return str(first_path) if first_path else None
     return None
 
 
-def detect_js_runtimes() -> Dict[str, str]:
-    """Return available JS runtimes as {runtime_name: executable_path}."""
-    runtimes: Dict[str, str] = {}
+def detect_js_runtimes() -> Dict[str, Dict[str, Any]]:
+    """
+    Return available JS runtimes in yt-dlp expected format:
+    {runtime_name: {config}} where config may contain "path".
+    """
+    runtimes: Dict[str, Dict[str, Any]] = {}
     for runtime in ("node", "deno", "bun"):
         exe = shutil.which(runtime)
         if exe:
-            runtimes[runtime] = exe
+            runtimes[runtime] = {"path": exe}
     return runtimes
 
 
@@ -237,7 +243,7 @@ def download_audio(url, out_dir) -> Tuple[Path, Dict]:
     # Check JS runtimes
     js_runtimes = detect_js_runtimes()
     if js_runtimes:
-        rt_text = ", ".join(f"{k}={v}" for k, v in js_runtimes.items())
+        rt_text = ", ".join(f"{k}={cfg.get('path', '')}" for k, cfg in js_runtimes.items())
         logger.info(f"JavaScript runtimes detected: {rt_text}")
     else:
         logger.warning("No JavaScript runtime found. Some videos may fail to download.")
