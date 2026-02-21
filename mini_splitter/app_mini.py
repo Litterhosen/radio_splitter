@@ -383,6 +383,9 @@ def run_pipeline() -> JobOutputs:
                     st.write(f"Fejlkategori: {e.error_code.value}")
                 if getattr(e, "hint", None):
                     st.write(e.hint)
+                if getattr(e, "next_steps", None):
+                    st.markdown("**Forslag:**")
+                    st.markdown(str(e.next_steps))
                 if getattr(e, "log_file", None):
                     st.write(f"Se download-log: {e.log_file}")
                 st.stop()

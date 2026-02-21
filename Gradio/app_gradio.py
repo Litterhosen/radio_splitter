@@ -117,6 +117,15 @@ def _collect_inputs(files: Optional[List[str]], url: str, run_dir: Path) -> Tupl
             notes.append(f"Downloaded: {dl_path.name}")
         except DownloadError as e:
             notes.append(f"Download failed: {e}")
+            if getattr(e, "error_code", None):
+                notes.append(f"Download error code: {e.error_code.value}")
+            if getattr(e, "hint", None):
+                notes.append(f"Diagnosis: {e.hint}")
+            if getattr(e, "next_steps", None):
+                notes.append("Next steps:")
+                notes.extend([line for line in str(e.next_steps).splitlines() if line.strip()])
+            if getattr(e, "log_file", None):
+                notes.append(f"Log file: {e.log_file}")
         except Exception as e:
             notes.append(f"Download failed: {type(e).__name__}: {e}")
 
