@@ -4,6 +4,8 @@ import logging
 import shutil
 import subprocess
 import os
+import re
+import base64
 from datetime import datetime
 from typing import Tuple, Optional, Dict, List, Any
 from enum import Enum
@@ -120,6 +122,33 @@ def _parse_cookies_from_browser(raw_value: str) -> Optional[Tuple[str, ...]]:
     return tuple(parts[:4])
 
 
+def _write_inline_cookies_if_configured(out_dir: Path, logger: YTDLPLogger) -> Optional[str]:
+    """
+    Support inline cookie injection from env vars for hosted deployments.
+    Env options:
+      - YTDLP_COOKIES_CONTENT (raw Netscape cookie text)
+      - YTDLP_COOKIES_B64 (base64-encoded Netscape cookie text)
+    """
+    raw_text = str(os.getenv("YTDLP_COOKIES_CONTENT", "") or "").strip()
+    raw_b64 = str(os.getenv("YTDLP_COOKIES_B64", "") or "").strip()
+    cookie_text = raw_text
+
+    if not cookie_text and raw_b64:
+        try:
+            cookie_text = base64.b64decode(raw_b64).decode("utf-8", errors="replace").strip()
+        except Exception as e:
+            logger.warning(f"YTDLP_COOKIES_B64 is set but could not be decoded: {type(e).__name__}")
+            cookie_text = ""
+
+    if not cookie_text:
+        return None
+
+    cookie_path = out_dir / "_cookies_runtime.txt"
+    cookie_path.write_text(cookie_text + "\n", encoding="utf-8")
+    logger.info("Using inline cookies from environment (YTDLP_COOKIES_CONTENT/YTDLP_COOKIES_B64).")
+    return str(cookie_path)
+
+
 def classify_error(error_text: str, has_js_runtime: bool, log_text: str = "") -> Tuple[ErrorClassification, str, str]:
     """
     Classify download error and provide helpful guidance.
@@ -150,7 +179,12 @@ def classify_error(error_text: str, has_js_runtime: bool, log_text: str = "") ->
             "3. Try a different video available in your region"
         )
 
-    if "age" in combined_text or "sign in to confirm" in combined_text:
+    if (
+        re.search(r"\bage[- ]?restricted\b", combined_text)
+        or "confirm your age" in combined_text
+        or "verify your age" in combined_text
+        or "age verification" in combined_text
+    ):
         return (
             ErrorClassification.ERR_AGE_RESTRICTED,
             "Video is age-restricted",
@@ -159,7 +193,14 @@ def classify_error(error_text: str, has_js_runtime: bool, log_text: str = "") ->
             "3. Ensure your account has access to this content"
         )
 
-    if "sign in" in combined_text or "login" in combined_text or "authenticate" in combined_text:
+    if (
+        "sign in to confirm you" in combined_text
+        or "login required" in combined_text
+        or "authentication required" in combined_text
+        or "members-only" in combined_text
+        or "private video" in combined_text
+        or "authenticate" in combined_text
+    ):
         return (
             ErrorClassification.ERR_LOGIN_REQUIRED,
             "Video requires authentication",
@@ -177,11 +218,12 @@ def classify_error(error_text: str, has_js_runtime: bool, log_text: str = "") ->
     ):
         return (
             ErrorClassification.ERR_VIDEO_UNAVAILABLE,
-            "Video is unavailable, private, removed, or blocked for your account/region",
+            "Video is unavailable from this runtime/location (or requires auth)",
             "1. Verify the URL is correct\n"
             "2. Open the URL in your browser while signed in and confirm availability\n"
             "3. If it works only when signed in, configure cookies for yt-dlp\n"
-            "4. Try a different video URL"
+            "4. Optional: set YTDLP_GEO_BYPASS_COUNTRY (e.g. US) and retry\n"
+            "5. Try a different video URL"
         )
 
     if (
@@ -262,7 +304,9 @@ def download_audio(url, out_dir) -> Tuple[Path, Dict]:
         ("android+web", {"youtube": {"player_client": ["android", "web"]}}),
         ("ios+web", {"youtube": {"player_client": ["ios", "web"]}}),
         ("tv+web", {"youtube": {"player_client": ["tv", "web"]}}),
-        ("default", None),
+        ("web_safari", {"youtube": {"player_client": ["web_safari"]}}),
+        ("android_vr", {"youtube": {"player_client": ["android_vr"]}}),
+        ("default", {"youtube": {"player_client": ["default"]}}),
     ]
     
     last_error = None
@@ -270,13 +314,19 @@ def download_audio(url, out_dir) -> Tuple[Path, Dict]:
     
     # Optional authentication inputs (env-based, no secrets committed in code).
     cookie_file = str(os.getenv("YTDLP_COOKIES_FILE", "") or "").strip()
+    cookie_file_source = "YTDLP_COOKIES_FILE"
+    inline_cookie_file = _write_inline_cookies_if_configured(out_dir, logger)
+    if not cookie_file and inline_cookie_file:
+        cookie_file = inline_cookie_file
+        cookie_file_source = "inline env cookies"
     cookie_browser_raw = str(os.getenv("YTDLP_COOKIES_FROM_BROWSER", "") or "").strip()
     cookie_browser = _parse_cookies_from_browser(cookie_browser_raw)
+    geo_bypass_country = str(os.getenv("YTDLP_GEO_BYPASS_COUNTRY", "") or "").strip().upper()
     if cookie_file:
         if Path(cookie_file).exists():
-            logger.info(f"Using cookies file from YTDLP_COOKIES_FILE: {cookie_file}")
+            logger.info(f"Using cookies file from {cookie_file_source}: {cookie_file}")
         else:
-            logger.warning(f"YTDLP_COOKIES_FILE is set but file does not exist: {cookie_file}")
+            logger.warning(f"Cookies file is configured but does not exist: {cookie_file}")
 
     for profile_name, extractor_args in extractor_profiles:
         for strategy in format_strategies:
@@ -310,6 +360,10 @@ def download_audio(url, out_dir) -> Tuple[Path, Dict]:
 
                 if js_runtimes:
                     ydl_opts["js_runtimes"] = dict(js_runtimes)
+
+                if geo_bypass_country:
+                    ydl_opts["geo_bypass_country"] = geo_bypass_country
+                    logger.info(f"Using geo bypass country: {geo_bypass_country}")
 
                 if cookie_file and Path(cookie_file).exists():
                     ydl_opts["cookiefile"] = cookie_file
