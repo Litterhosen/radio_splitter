@@ -42,7 +42,7 @@ from Gradio.audio_split import (
     get_duration_seconds,
 )
 from transcribe import load_model, transcribe_wav
-from downloaders import download_audio, DownloadError
+from downloaders import download_audio, DownloadError, check_cookie_health
 from tagging import auto_tags
 from jingle_finder import jingle_score
 from hook_finder import (
@@ -460,11 +460,63 @@ with tab_upload:
 
 with tab_link:
     url = st.text_input("URL", placeholder="https://... (YouTube, Archive, etc.)")
-    dl_col1, dl_col2 = st.columns([1, 3])
+    dl_col1, dl_col2, dl_col3 = st.columns([1, 1, 3])
     with dl_col1:
         dl_btn = st.button("Download", type="primary", disabled=not url.strip())
     with dl_col2:
+        cookie_check_btn = st.button("Tjek cookies", type="secondary")
+    with dl_col3:
         st.caption("Downloads to: output/Downloads/")
+
+    if cookie_check_btn:
+        try:
+            with st.spinner("Tjekker cookie health..."):
+                health = check_cookie_health(OUTPUT_ROOT / "Downloads")
+
+            if health.get("ok"):
+                st.success("✅ Cookie health check: OK")
+            else:
+                st.warning(f"⚠️ Cookie health check: {health.get('summary', 'failed')}")
+
+            auth_source = health.get("auth_source", "none")
+            st.caption(f"Auth source: {auth_source}")
+
+            geo_country = str(health.get("geo_bypass_country", "") or "").strip()
+            if geo_country:
+                st.caption(f"Geo bypass country: {geo_country}")
+
+            cookie_file_summary = health.get("cookie_file_summary")
+            if isinstance(cookie_file_summary, dict):
+                st.info(
+                    "Cookie rows: "
+                    f"{cookie_file_summary.get('parsed_cookie_rows', 0)} parsed, "
+                    f"{cookie_file_summary.get('youtube_google_rows', 0)} YouTube/Google, "
+                    f"{cookie_file_summary.get('youtube_google_active_rows', 0)} active."
+                )
+
+            if health.get("hint"):
+                st.warning(f"💡 {health['hint']}")
+
+            if health.get("next_steps"):
+                with st.expander("Next steps from checker"):
+                    st.markdown(health["next_steps"])
+
+            if health.get("probe_error"):
+                with st.expander("🔍 Cookie check technical details"):
+                    st.code(str(health["probe_error"]), language="text")
+
+            log_file = str(health.get("log_file", "") or "").strip()
+            if log_file:
+                try:
+                    with open(log_file, "r", encoding="utf-8", errors="replace") as f:
+                        health_log = f.read()
+                    with st.expander("📋 Cookie health log"):
+                        st.code(health_log, language="text")
+                except Exception as log_error:
+                    st.warning(f"Could not read cookie health log: {log_error}")
+
+        except Exception as e:
+            st.error(f"❌ Cookie health check crashed: {e}")
     
     if dl_btn:
         try:

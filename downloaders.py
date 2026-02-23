@@ -18,6 +18,7 @@ class ErrorClassification(Enum):
     ERR_GEO_BLOCK = "ERR_GEO_BLOCK"
     ERR_AGE_RESTRICTED = "ERR_AGE_RESTRICTED"
     ERR_LOGIN_REQUIRED = "ERR_LOGIN_REQUIRED"
+    ERR_COOKIE_CONFIG = "ERR_COOKIE_CONFIG"
     ERR_NETWORK = "ERR_NETWORK"
     ERR_UNKNOWN = "ERR_UNKNOWN"
 
@@ -137,7 +138,10 @@ def _write_inline_cookies_if_configured(out_dir: Path, logger: YTDLPLogger) -> O
         try:
             cookie_text = base64.b64decode(raw_b64).decode("utf-8", errors="replace").strip()
         except Exception as e:
-            logger.warning(f"YTDLP_COOKIES_B64 is set but could not be decoded: {type(e).__name__}")
+            logger.warning(
+                "YTDLP_COOKIES_B64 is set but could not be decoded: "
+                f"{type(e).__name__}: {str(e)[:120]}"
+            )
             cookie_text = ""
 
     if not cookie_text:
@@ -147,6 +151,226 @@ def _write_inline_cookies_if_configured(out_dir: Path, logger: YTDLPLogger) -> O
     cookie_path.write_text(cookie_text + "\n", encoding="utf-8")
     logger.info("Using inline cookies from environment (YTDLP_COOKIES_CONTENT/YTDLP_COOKIES_B64).")
     return str(cookie_path)
+
+
+def _resolve_auth_inputs(
+    out_dir: Path,
+    logger: YTDLPLogger,
+) -> Tuple[str, str, Optional[Tuple[str, ...]], str, Optional[str]]:
+    """
+    Resolve cookie/auth-related options from environment.
+
+    Returns:
+        Tuple of (cookie_file, cookie_file_source, cookie_browser, geo_bypass_country, inline_cookie_file)
+    """
+    cookie_file = str(os.getenv("YTDLP_COOKIES_FILE", "") or "").strip()
+    cookie_file_source = "YTDLP_COOKIES_FILE"
+    inline_cookie_file = _write_inline_cookies_if_configured(out_dir, logger)
+    if not cookie_file and inline_cookie_file:
+        cookie_file = inline_cookie_file
+        cookie_file_source = "inline env cookies"
+
+    cookie_browser_raw = str(os.getenv("YTDLP_COOKIES_FROM_BROWSER", "") or "").strip()
+    cookie_browser = _parse_cookies_from_browser(cookie_browser_raw)
+    geo_bypass_country = str(os.getenv("YTDLP_GEO_BYPASS_COUNTRY", "") or "").strip().upper()
+
+    if cookie_file:
+        if Path(cookie_file).exists():
+            logger.info(f"Using cookies file from {cookie_file_source}: {cookie_file}")
+        else:
+            logger.warning(f"Cookies file is configured but does not exist: {cookie_file}")
+
+    if cookie_browser:
+        logger.info(f"Using cookies from browser config: {cookie_browser}")
+
+    if geo_bypass_country:
+        logger.info(f"Using geo bypass country: {geo_bypass_country}")
+
+    raw_b64 = str(os.getenv("YTDLP_COOKIES_B64", "") or "").strip()
+    raw_text = str(os.getenv("YTDLP_COOKIES_CONTENT", "") or "").strip()
+    if raw_b64 and not raw_text and not inline_cookie_file:
+        logger.error(
+            "Invalid YTDLP_COOKIES_B64 configuration. "
+            "Use plain base64 of a Netscape cookies.txt file (no line breaks, no extra quoting)."
+        )
+
+    return cookie_file, cookie_file_source, cookie_browser, geo_bypass_country, inline_cookie_file
+
+
+def _summarize_cookie_file(cookie_path: Path) -> Dict[str, Any]:
+    """
+    Parse Netscape cookie file and return non-sensitive health summary.
+    """
+    now_ts = int(datetime.now().timestamp())
+    summary: Dict[str, Any] = {
+        "exists": cookie_path.exists(),
+        "path": str(cookie_path),
+        "total_cookie_rows": 0,
+        "parsed_cookie_rows": 0,
+        "parse_errors": 0,
+        "youtube_google_rows": 0,
+        "youtube_google_active_rows": 0,
+    }
+
+    if not cookie_path.exists():
+        return summary
+
+    try:
+        lines = cookie_path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except Exception:
+        summary["read_error"] = True
+        return summary
+
+    for line in lines:
+        row = line.strip()
+        if not row or row.startswith("#"):
+            continue
+        summary["total_cookie_rows"] += 1
+        parts = row.split("\t")
+        if len(parts) < 7:
+            summary["parse_errors"] += 1
+            continue
+
+        summary["parsed_cookie_rows"] += 1
+        domain = parts[0].lower()
+        expires_raw = parts[4].strip()
+        is_relevant = (
+            "youtube.com" in domain
+            or "google.com" in domain
+            or "googlevideo.com" in domain
+            or "ytimg.com" in domain
+        )
+        if not is_relevant:
+            continue
+
+        summary["youtube_google_rows"] += 1
+
+        try:
+            expires_ts = int(float(expires_raw))
+        except Exception:
+            # Unknown expiry format - treat as potentially active
+            expires_ts = now_ts
+
+        # Netscape format uses 0 for session cookies.
+        if expires_ts == 0 or expires_ts >= now_ts:
+            summary["youtube_google_active_rows"] += 1
+
+    return summary
+
+
+def check_cookie_health(
+    out_dir: Path,
+    probe_url: str = "https://www.youtube.com/feed/history",
+) -> Dict[str, Any]:
+    """
+    Validate yt-dlp cookie setup and run an authenticated probe.
+    """
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_file = out_dir / f"cookie_health_{timestamp}.txt"
+    logger = YTDLPLogger(log_file)
+
+    result: Dict[str, Any] = {
+        "ok": False,
+        "summary": "Cookie health check did not complete.",
+        "log_file": str(log_file),
+        "probe_url": probe_url,
+        "auth_source": "none",
+        "configured": False,
+    }
+
+    try:
+        js_runtimes = detect_js_runtimes()
+        result["js_runtimes"] = sorted(js_runtimes.keys())
+        if js_runtimes:
+            rt_text = ", ".join(f"{k}={cfg.get('path', '')}" for k, cfg in js_runtimes.items())
+            logger.info(f"JavaScript runtimes detected: {rt_text}")
+        else:
+            logger.warning("No JavaScript runtime found.")
+
+        cookie_file, cookie_file_source, cookie_browser, geo_bypass_country, inline_cookie_file = _resolve_auth_inputs(
+            out_dir,
+            logger,
+        )
+        result["geo_bypass_country"] = geo_bypass_country
+
+        if cookie_file and Path(cookie_file).exists():
+            result["configured"] = True
+            result["auth_source"] = cookie_file_source
+            result["cookie_file"] = cookie_file
+            cookie_summary = _summarize_cookie_file(Path(cookie_file))
+            result["cookie_file_summary"] = cookie_summary
+
+            if cookie_summary.get("youtube_google_rows", 0) == 0:
+                result["summary"] = "Cookies file has no YouTube/Google cookies."
+                return result
+
+            if cookie_summary.get("youtube_google_active_rows", 0) == 0:
+                result["summary"] = "Cookies file has no active YouTube/Google cookies (possibly expired)."
+                return result
+        elif cookie_browser:
+            result["configured"] = True
+            result["auth_source"] = "YTDLP_COOKIES_FROM_BROWSER"
+            result["cookies_from_browser"] = ":".join(cookie_browser)
+        else:
+            raw_b64 = str(os.getenv("YTDLP_COOKIES_B64", "") or "").strip()
+            if raw_b64 and not inline_cookie_file:
+                result["summary"] = (
+                    "YTDLP_COOKIES_B64 is set but invalid (cannot decode). Regenerate base64 from cookies.txt."
+                )
+            else:
+                result["summary"] = (
+                    "No cookie configuration found. Set YTDLP_COOKIES_B64 or YTDLP_COOKIES_FILE."
+                )
+            return result
+
+        ydl_opts = {
+            "skip_download": True,
+            "simulate": True,
+            "noplaylist": True,
+            "quiet": False,
+            "no_warnings": False,
+            "logger": logger,
+            "retries": 1,
+            "extractor_retries": 1,
+            "socket_timeout": 20,
+            "geo_bypass": True,
+        }
+        if js_runtimes:
+            ydl_opts["js_runtimes"] = dict(js_runtimes)
+        if geo_bypass_country:
+            ydl_opts["geo_bypass_country"] = geo_bypass_country
+        if cookie_file and Path(cookie_file).exists():
+            ydl_opts["cookiefile"] = cookie_file
+        elif cookie_browser:
+            ydl_opts["cookiesfrombrowser"] = cookie_browser
+
+        logger.info(f"Running authenticated probe URL: {probe_url}")
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(probe_url, download=False)
+
+        probe_title = ""
+        if isinstance(info, dict):
+            probe_title = str(info.get("title", "") or "").strip()
+        result["probe_title"] = probe_title
+        result["ok"] = True
+        result["summary"] = "Cookie check passed and authenticated probe succeeded."
+        return result
+
+    except Exception as e:
+        err_text = str(e)
+        result["probe_error"] = err_text
+        error_code, hint, next_steps = classify_error(err_text, bool(result.get("js_runtimes")))
+        result["error_code"] = error_code.value
+        result["hint"] = hint
+        result["next_steps"] = next_steps
+        result["summary"] = f"Probe failed: {hint}"
+        logger.error(f"Cookie health probe failed: {err_text}")
+        return result
+    finally:
+        logger.close()
 
 
 def classify_error(error_text: str, has_js_runtime: bool, log_text: str = "") -> Tuple[ErrorClassification, str, str]:
@@ -163,13 +387,24 @@ def classify_error(error_text: str, has_js_runtime: bool, log_text: str = "") ->
     """
     error_lower = str(error_text or "").lower()
     combined_text = f"{error_lower}\n{str(log_text or '').lower()}"
-    
+
+    if "ytdlp_cookies_b64 is set but could not be decoded" in combined_text:
+        return (
+            ErrorClassification.ERR_COOKIE_CONFIG,
+            "Cookie configuration is invalid (YTDLP_COOKIES_B64 cannot be decoded)",
+            "1. Regenerate base64 from a valid Netscape cookies.txt file\n"
+            "2. Paste full base64 string into YTDLP_COOKIES_B64\n"
+            "3. Keep only one cookie method enabled (B64 or file)\n"
+            "4. Re-run cookie health check"
+        )
+
     # Check for specific error patterns
     if (
         "not available in your country" in combined_text
-        or "geo" in combined_text
-        or "region" in combined_text
         or "not available in your region" in combined_text
+        or "geo-restricted" in combined_text
+        or "geo restricted" in combined_text
+        or "geoblocked" in combined_text
     ):
         return (
             ErrorClassification.ERR_GEO_BLOCK,
@@ -313,20 +548,7 @@ def download_audio(url, out_dir) -> Tuple[Path, Dict]:
     youtube_info = {}
     
     # Optional authentication inputs (env-based, no secrets committed in code).
-    cookie_file = str(os.getenv("YTDLP_COOKIES_FILE", "") or "").strip()
-    cookie_file_source = "YTDLP_COOKIES_FILE"
-    inline_cookie_file = _write_inline_cookies_if_configured(out_dir, logger)
-    if not cookie_file and inline_cookie_file:
-        cookie_file = inline_cookie_file
-        cookie_file_source = "inline env cookies"
-    cookie_browser_raw = str(os.getenv("YTDLP_COOKIES_FROM_BROWSER", "") or "").strip()
-    cookie_browser = _parse_cookies_from_browser(cookie_browser_raw)
-    geo_bypass_country = str(os.getenv("YTDLP_GEO_BYPASS_COUNTRY", "") or "").strip().upper()
-    if cookie_file:
-        if Path(cookie_file).exists():
-            logger.info(f"Using cookies file from {cookie_file_source}: {cookie_file}")
-        else:
-            logger.warning(f"Cookies file is configured but does not exist: {cookie_file}")
+    cookie_file, _, cookie_browser, geo_bypass_country, _ = _resolve_auth_inputs(out_dir, logger)
 
     for profile_name, extractor_args in extractor_profiles:
         for strategy in format_strategies:

@@ -11,3 +11,5 @@ crash_test/results/
 app_old.py
 cleanup_log*.txt
 migration_log*.txt
+.streamlit/secrets.toml
+.streamlit/cookies.txt
